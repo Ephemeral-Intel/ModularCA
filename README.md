@@ -82,4 +82,4 @@ Some things, done or planned, may not make sense. Please share input on any proc
 Contributors are welcome, and feature requests are too.
 
 ## AI-Generated Content Disclaimer
-Initial development was guided by AI, with the majority of code human-oriented. Toward the second half of the project, reliance on AI increased to develop functionality and frontend pages. AI is a tool and human input is still necessary to review it. I am looking towards getting more humans to review the program..
+Initial development was guided by AI, with the majority of code human-oriented. Toward the second half of the project, reliance on AI increased to develop functionality and frontend pages. AI is a tool and human input is still necessary to review it. I am looking towards getting more humans to review the program.
