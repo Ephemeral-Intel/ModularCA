@@ -1,0 +1,456 @@
+import React, { useState, useEffect } from 'react';
+import { apiGet, apiPut, apiPutWithMfa } from '../api/client';
+import { useStepUp } from '../components/StepUpMfaContext';
+import { useToast } from '../context/ToastContext';
+import StatusBadge from '../components/cards/StatusBadge';
+import DetailField from '../components/cards/DetailField';
+
+const PROTOCOLS = ['EST', 'SCEP', 'CMP', 'ACME', 'OCSP'];
+const ACME_CHALLENGE_OPTIONS = ['http-01', 'dns-01', 'tls-alpn-01'];
+
+const ProtocolConfig: React.FC = () => {
+    const { showToast } = useToast();
+    const { requireStepUp } = useStepUp();
+    const [authorities, setAuthorities] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [selectedCaId, setSelectedCaId] = useState('');
+    const [expandedProtocol, setExpandedProtocol] = useState<string | null>(null);
+    const [protocolConfigs, setProtocolConfigs] = useState<any[]>([]);
+    const [configLoading, setConfigLoading] = useState(false);
+    const [signingProfiles, setSigningProfiles] = useState<any[]>([]);
+    const [certProfiles, setCertProfiles] = useState<any[]>([]);
+    const [saving, setSaving] = useState<string | null>(null);
+
+    const flattenCas = (cas: any[]): any[] => {
+        const result: any[] = [];
+        for (const ca of cas) {
+            // Hide the System Signing CA — it never serves enrollment protocols.
+            if ((ca.label || '').toLowerCase() === 'system-signing-ca') {
+                if (ca.children && ca.children.length > 0) result.push(...flattenCas(ca.children));
+                continue;
+            }
+            result.push(ca);
+            if (ca.children && ca.children.length > 0) {
+                result.push(...flattenCas(ca.children));
+            }
+        }
+        return result;
+    };
+
+    useEffect(() => {
+        setLoading(true);
+        Promise.all([
+            apiGet<any>('/api/v1/admin/authorities/hierarchy'),
+            apiGet<any>('/api/v1/admin/signing-profiles'),
+            apiGet<any>('/api/v1/admin/cert-profiles'),
+        ])
+            .then(([caData, spData, cpData]) => {
+                const items = Array.isArray(caData) ? caData : (caData.items || caData.authorities || []);
+                setAuthorities(items);
+                setSigningProfiles(Array.isArray(spData) ? spData : (spData.items || spData.profiles || []));
+                setCertProfiles(Array.isArray(cpData) ? cpData : (cpData.items || cpData.profiles || []));
+                const flat = flattenCas(items);
+                if (flat.length > 0) {
+                    const firstId = flat[0].id || flat[0].certificateId || flat[0].name || '';
+                    setSelectedCaId(firstId);
+                }
+                setLoading(false);
+            })
+            .catch((err) => {
+                setError(err.message || 'Failed to load data');
+                setLoading(false);
+            });
+    }, []);
+
+    useEffect(() => {
+        if (!selectedCaId) return;
+        setConfigLoading(true);
+        apiGet<any>(`/api/v1/admin/protocol-configs/${selectedCaId}`)
+            .then((data) => setProtocolConfigs(Array.isArray(data) ? data : []))
+            .catch(() => setProtocolConfigs([]))
+            .finally(() => setConfigLoading(false));
+    }, [selectedCaId]);
+
+    const allCasFlat = flattenCas(authorities);
+
+    const getProtocolConfig = (protocol: string): any | null => {
+        return protocolConfigs.find(
+            (pc: any) => (pc.protocol || '').toUpperCase() === protocol.toUpperCase()
+        ) || null;
+    };
+
+    const handleSave = async (protocol: string, updates: any) => {
+        setSaving(protocol);
+        try {
+            await apiPutWithMfa(`/api/v1/admin/protocol-configs/${selectedCaId}/${protocol}`, updates, requireStepUp, 'update-protocol-config', selectedCaId);
+            const data = await apiGet<any>(`/api/v1/admin/protocol-configs/${selectedCaId}`);
+            setProtocolConfigs(Array.isArray(data) ? data : []);
+        } catch (err: any) {
+            showToast('error', err.message || `Failed to update ${protocol} config`);
+        } finally {
+            setSaving(null);
+        }
+    };
+
+    const selectClass = 'w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white focus:outline-none focus:border-blue-500';
+    const labelClass = 'block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1';
+
+    return (
+        <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Protocol Configuration</h1>
+
+            {/* CA Selector */}
+            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Select Certificate Authority</h3>
+                </div>
+                <div className="p-4">
+                    {loading && <p className="text-sm text-gray-600 dark:text-gray-400">Loading authorities...</p>}
+                    {error && <p className="text-sm text-red-800 dark:text-red-400">{error}</p>}
+                    {!loading && !error && (
+                        <select
+                            value={selectedCaId}
+                            onChange={(e) => {
+                                setSelectedCaId(e.target.value);
+                                setExpandedProtocol(null);
+                            }}
+                            className="w-full max-w-md px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white focus:outline-none focus:border-blue-500"
+                        >
+                            {allCasFlat.length === 0 && <option value="">No CAs available</option>}
+                            {allCasFlat.map((ca) => {
+                                const id = ca.id || ca.certificateId || ca.name;
+                                return (
+                                    <option key={id} value={id}>
+                                        {ca.name || ca.subjectDN}
+                                    </option>
+                                );
+                            })}
+                        </select>
+                    )}
+                </div>
+            </div>
+
+            {configLoading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400">Loading protocol configs...</div>}
+
+            {/* Protocol Cards */}
+            {selectedCaId && !configLoading && PROTOCOLS.map((protocol) => {
+                const config = getProtocolConfig(protocol);
+                const expanded = expandedProtocol === protocol;
+
+                return (
+                    <ProtocolCard
+                        key={protocol}
+                        protocol={protocol}
+                        config={config}
+                        expanded={expanded}
+                        onToggleExpand={() => setExpandedProtocol(expanded ? null : protocol)}
+                        onSave={(updates) => handleSave(protocol, updates)}
+                        saving={saving === protocol}
+                        signingProfiles={signingProfiles}
+                        certProfiles={certProfiles}
+                        labelClass={labelClass}
+                        selectClass={selectClass}
+                    />
+                );
+            })}
+
+            {!selectedCaId && !loading && !error && (
+                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-6 text-center">
+                    <p className="text-sm text-gray-600">Select a Certificate Authority above to view protocol configurations.</p>
+                </div>
+            )}
+        </div>
+    );
+};
+
+interface ProtocolCardProps {
+    protocol: string;
+    config: any;
+    expanded: boolean;
+    onToggleExpand: () => void;
+    onSave: (updates: any) => void;
+    saving: boolean;
+    signingProfiles: any[];
+    certProfiles: any[];
+    labelClass: string;
+    selectClass: string;
+}
+
+const ToggleField: React.FC<{ label: string; description?: string; checked: boolean; onChange: (v: boolean) => void; selectClass: string }> = ({ label, description, checked, onChange, selectClass }) => (
+    <div className="flex items-center justify-between py-1">
+        <div>
+            <span className="text-xs text-gray-700 dark:text-gray-300">{label}</span>
+            {description && <p className="text-[10px] text-gray-600">{description}</p>}
+        </div>
+        <button onClick={() => onChange(!checked)} className={`relative w-11 h-6 rounded-full transition-colors ${checked ? 'bg-blue-600' : 'bg-gray-600'}`}>
+            <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
+        </button>
+    </div>
+);
+
+const ProtocolCard: React.FC<ProtocolCardProps> = ({
+    protocol, config, expanded, onToggleExpand, onSave, saving,
+    signingProfiles, certProfiles, labelClass, selectClass,
+}) => {
+    const [form, setForm] = useState<Record<string, any>>({
+        enabled: false,
+        signingProfileId: '',
+        certProfileId: '',
+        isPublicVisible: true,
+        allowedIpRanges: '',
+        // EST
+        estRequireClientCert: false,
+        estHttpAuthEnabled: false,
+        // SCEP
+        scepChallengeRequired: true,
+        // CMP
+        cmpSharedSecret: '',
+        cmpRequireSignature: false,
+        // ACME
+        acmeRequireEab: false,
+        acmeAllowedChallengeTypes: '',
+        acmeAllowPrivateAddressValidation: false,
+        // OCSP
+        ocspSignResponses: true,
+    });
+
+    const parseIpRangesForDisplay = (value: any): string => {
+        if (!value) return '';
+        if (Array.isArray(value)) return value.join(', ');
+        if (typeof value === 'string') {
+            try {
+                const parsed = JSON.parse(value);
+                if (Array.isArray(parsed)) return parsed.join(', ');
+            } catch {
+                // already comma-separated or plain string
+            }
+            return value;
+        }
+        return '';
+    };
+
+    useEffect(() => {
+        if (config) {
+            setForm({
+                enabled: config.enabled ?? false,
+                signingProfileId: config.signingProfileId || '',
+                certProfileId: config.certProfileId || '',
+                isPublicVisible: config.isPublicVisible ?? true,
+                allowedIpRanges: parseIpRangesForDisplay(config.allowedIpRanges),
+                estRequireClientCert: config.estRequireClientCert ?? false,
+                estHttpAuthEnabled: config.estHttpAuthEnabled ?? false,
+                scepChallengeRequired: config.scepChallengeRequired ?? true,
+                cmpSharedSecret: config.cmpSharedSecret || '',
+                cmpRequireSignature: config.cmpRequireSignature ?? false,
+                acmeRequireEab: config.acmeRequireEab ?? false,
+                acmeAllowedChallengeTypes: config.acmeAllowedChallengeTypes || '',
+                acmeAllowPrivateAddressValidation: config.acmeAllowPrivateAddressValidation ?? false,
+                ocspSignResponses: config.ocspSignResponses ?? true,
+            });
+        } else {
+            setForm({
+                enabled: false, signingProfileId: '', certProfileId: '',
+                isPublicVisible: true, allowedIpRanges: '',
+                estRequireClientCert: false, estHttpAuthEnabled: false,
+                scepChallengeRequired: true,
+                cmpSharedSecret: '', cmpRequireSignature: false,
+                acmeRequireEab: false, acmeAllowedChallengeTypes: '',
+                acmeAllowPrivateAddressValidation: false,
+                ocspSignResponses: true,
+            });
+        }
+    }, [config]);
+
+    const serializeIpRanges = (value: string): string | null => {
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        const parts = trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+        return JSON.stringify(parts);
+    };
+
+    const handleSubmit = () => {
+        const base: Record<string, any> = {
+            enabled: form.enabled,
+            signingProfileId: form.signingProfileId || null,
+            certProfileId: form.certProfileId || null,
+            isPublicVisible: form.isPublicVisible,
+            allowedIpRanges: serializeIpRanges(form.allowedIpRanges),
+        };
+        if (protocol === 'EST') {
+            base.estRequireClientCert = form.estRequireClientCert;
+            base.estHttpAuthEnabled = form.estHttpAuthEnabled;
+        } else if (protocol === 'SCEP') {
+            base.scepChallengeRequired = form.scepChallengeRequired;
+        } else if (protocol === 'CMP') {
+            base.cmpSharedSecret = form.cmpSharedSecret || null;
+            base.cmpRequireSignature = form.cmpRequireSignature;
+        } else if (protocol === 'ACME') {
+            base.acmeRequireEab = form.acmeRequireEab;
+            base.acmeAllowedChallengeTypes = form.acmeAllowedChallengeTypes || null;
+            base.acmeAllowPrivateAddressValidation = form.acmeAllowPrivateAddressValidation;
+        } else if (protocol === 'OCSP') {
+            base.ocspSignResponses = form.ocspSignResponses;
+        }
+        onSave(base);
+    };
+
+    const needsProfiles = protocol !== 'OCSP';
+
+    return (
+        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
+            <button
+                onClick={onToggleExpand}
+                className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
+            >
+                <span className="text-gray-600 text-xs">{expanded ? '\u25BC' : '\u25B6'}</span>
+                <span className="text-sm font-semibold text-gray-900 dark:text-white">{protocol}</span>
+                {config ? (
+                    <StatusBadge
+                        status={config.enabled ? 'enabled' : 'disabled'}
+                        label={config.enabled ? 'Enabled' : 'Disabled'}
+                    />
+                ) : (
+                    <StatusBadge status="disabled" label="Not Configured" />
+                )}
+                {config?.signingProfileName && (
+                    <span className="text-xs text-gray-600 ml-auto">Signing: {config.signingProfileName}</span>
+                )}
+            </button>
+            {expanded && (
+                <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
+                    {/* Common fields */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label className={labelClass}>Enabled</label>
+                            <select
+                                value={form.enabled ? 'true' : 'false'}
+                                onChange={(e) => setForm({ ...form, enabled: e.target.value === 'true' })}
+                                className={selectClass}
+                            >
+                                <option value="true">Yes</option>
+                                <option value="false">No</option>
+                            </select>
+                        </div>
+                        {needsProfiles && (
+                            <>
+                                <div>
+                                    <label className={labelClass}>Signing Profile</label>
+                                    <select value={form.signingProfileId} onChange={(e) => setForm({ ...form, signingProfileId: e.target.value })} className={selectClass}>
+                                        <option value="">Not assigned</option>
+                                        {signingProfiles.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className={labelClass}>Certificate Profile</label>
+                                    <select value={form.certProfileId} onChange={(e) => setForm({ ...form, certProfileId: e.target.value })} className={selectClass}>
+                                        <option value="">Not assigned</option>
+                                        {certProfiles.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                    </select>
+                                </div>
+                            </>
+                        )}
+                    </div>
+
+                    {/* Visibility & Access Control */}
+                    <div className="border-t border-gray-300 dark:border-gray-700 pt-3">
+                        <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Visibility &amp; Access</h4>
+                        <div className="space-y-3">
+                            <ToggleField
+                                label="Show on Public Portal"
+                                description="When unchecked, this protocol endpoint won't appear on the public portal for this CA"
+                                checked={form.isPublicVisible}
+                                onChange={(v) => setForm({ ...form, isPublicVisible: v })}
+                                selectClass={selectClass}
+                            />
+                            <div>
+                                <label className={labelClass}>IP Whitelist Override (CIDR, comma-separated)</label>
+                                <input
+                                    type="text"
+                                    value={form.allowedIpRanges}
+                                    onChange={(e) => setForm({ ...form, allowedIpRanges: e.target.value })}
+                                    placeholder="Leave empty to use system default"
+                                    className={selectClass}
+                                />
+                                <p className="text-[10px] text-gray-600 mt-1">Restrict access to specific IP ranges. Example: 10.0.0.0/8, 192.168.1.0/24</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Protocol-specific fields */}
+                    <div className="border-t border-gray-300 dark:border-gray-700 pt-3">
+                        <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">{protocol} Settings</h4>
+
+                        {protocol === 'EST' && (
+                            <div className="space-y-2">
+                                <ToggleField label="Require Client Certificate" description="Clients must present a valid certificate for enrollment" checked={form.estRequireClientCert} onChange={(v) => setForm({ ...form, estRequireClientCert: v })} selectClass={selectClass} />
+                                <ToggleField label="HTTP Authentication" description="Accept HTTP Basic/Digest authentication for enrollment" checked={form.estHttpAuthEnabled} onChange={(v) => setForm({ ...form, estHttpAuthEnabled: v })} selectClass={selectClass} />
+                            </div>
+                        )}
+
+                        {protocol === 'SCEP' && (
+                            <div className="space-y-2">
+                                <ToggleField label="Require Challenge Password" description="CSR must include a challenge password for enrollment" checked={form.scepChallengeRequired} onChange={(v) => setForm({ ...form, scepChallengeRequired: v })} selectClass={selectClass} />
+                            </div>
+                        )}
+
+                        {protocol === 'CMP' && (
+                            <div className="space-y-3">
+                                <ToggleField label="Require Signature Protection" description="When enabled, only signature-based protection is accepted (client cert required). When disabled, PBMAC (shared secret) is also accepted." checked={form.cmpRequireSignature} onChange={(v) => setForm({ ...form, cmpRequireSignature: v })} selectClass={selectClass} />
+                                <div>
+                                    <label className={labelClass}>Shared Secret (PBMAC)</label>
+                                    <input type="password" value={form.cmpSharedSecret} onChange={(e) => setForm({ ...form, cmpSharedSecret: e.target.value })} placeholder="(not set)" className={selectClass} />
+                                    <p className="text-[10px] text-gray-600 mt-1">Used for password-based MAC protection (RFC 4210). Leave empty to disable PBMAC.</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {protocol === 'ACME' && (
+                            <div className="space-y-3">
+                                <ToggleField label="Require External Account Binding" description="Accounts must provide an EAB key during registration (RFC 8555 \u00A77.3.4)" checked={form.acmeRequireEab} onChange={(v) => setForm({ ...form, acmeRequireEab: v })} selectClass={selectClass} />
+                                <ToggleField label="Allow Private Address Validation (HTTP-01)" description="Permit the http-01 validator to fetch challenges from RFC 1918 / loopback / link-local addresses for this CA. Required for internal-only PKI; leave off for public deployments to prevent SSRF." checked={form.acmeAllowPrivateAddressValidation} onChange={(v) => setForm({ ...form, acmeAllowPrivateAddressValidation: v })} selectClass={selectClass} />
+                                <div>
+                                    <label className={labelClass}>Allowed Challenge Types</label>
+                                    <div className="flex gap-3 mt-1">
+                                        {ACME_CHALLENGE_OPTIONS.map((ct) => {
+                                            const types = (form.acmeAllowedChallengeTypes || '').split(',').filter(Boolean);
+                                            const checked = types.includes(ct);
+                                            return (
+                                                <label key={ct} className="flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300 cursor-pointer">
+                                                    <input type="checkbox" checked={checked} onChange={(e) => {
+                                                        const next = e.target.checked ? [...types, ct] : types.filter((t: string) => t !== ct);
+                                                        setForm({ ...form, acmeAllowedChallengeTypes: next.join(',') });
+                                                    }} className="w-3.5 h-3.5 accent-blue-500" />
+                                                    {ct}
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                    <p className="text-[10px] text-gray-600 mt-1">Leave all unchecked to allow all challenge types.</p>
+                                </div>
+                            </div>
+                        )}
+
+                        {protocol === 'OCSP' && (
+                            <div className="space-y-2">
+                                <ToggleField label="Sign Responses" description="Sign OCSP responses with the CA's OCSP responder key" checked={form.ocspSignResponses} onChange={(v) => setForm({ ...form, ocspSignResponses: v })} selectClass={selectClass} />
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="flex justify-end">
+                        <button
+                            onClick={handleSubmit}
+                            disabled={saving}
+                            className="px-4 py-2 text-sm bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                        >
+                            {saving ? 'Saving...' : (config ? 'Update' : 'Create Configuration')}
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+export default ProtocolConfig;

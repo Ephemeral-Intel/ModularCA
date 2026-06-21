@@ -1,0 +1,711 @@
+import React, { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
+import { apiGet, apiPost, apiPut, apiDelete, apiPostWithMfa } from '../api/client';
+import { useStepUp } from '../components/StepUpMfaContext';
+import { useToast } from '../context/ToastContext';
+import StatusBadge from '../components/cards/StatusBadge';
+import DetailField from '../components/cards/DetailField';
+
+function formatDate(d: string | null) {
+    if (!d) return '-';
+    return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function caTypeBadge(ca: any): { status: 'active' | 'pending' | 'disabled'; label: string } {
+    const t = (ca.type || ca.caType || '').toLowerCase();
+    if (t.includes('root')) return { status: 'active', label: 'Root' };
+    if (t.includes('intermediate')) return { status: 'pending', label: 'Intermediate' };
+    return { status: 'disabled', label: 'Issuing' };
+}
+
+interface ServiceUrls {
+    caId: string;
+    publicBaseUrl: string;
+}
+
+const CaManagement: React.FC = () => {
+    const { requireStepUp } = useStepUp();
+    const { showToast } = useToast();
+
+    // CA List state
+    const [authorities, setAuthorities] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [expandedCa, setExpandedCa] = useState<string | null>(null);
+
+    // Tenant state
+    const [tenants, setTenants] = useState<any[]>([]);
+    const [formTenant, setFormTenant] = useState('');
+
+    // Create CA form state
+    const [createExpanded, setCreateExpanded] = useState(false);
+    const [formCaType, setFormCaType] = useState<'root' | 'intermediate'>('intermediate');
+    const [formCN, setFormCN] = useState('');
+    const [formOrg, setFormOrg] = useState('');
+    const [formOU, setFormOU] = useState('');
+    const [formL, setFormL] = useState('');
+    const [formST, setFormST] = useState('');
+    const [formC, setFormC] = useState('');
+    const [formKeyAlg, setFormKeyAlg] = useState('ECDSA');
+    const [formKeySize, setFormKeySize] = useState('384');
+    const [formValidityYears, setFormValidityYears] = useState('10');
+    const [formParentCa, setFormParentCa] = useState('');
+    const [formLabel, setFormLabel] = useState('');
+    const [formCertProfile, setFormCertProfile] = useState('');
+    const [caCertProfiles, setCaCertProfiles] = useState<any[]>([]);
+    const [formPublicBaseUrl, setFormPublicBaseUrl] = useState('');
+    const [createLoading, setCreateLoading] = useState(false);
+    const [createError, setCreateError] = useState<string | null>(null);
+    const [createSuccess, setCreateSuccess] = useState<string | null>(null);
+
+    // Name constraints — committed string[] arrays sent in the POST body
+    const [formNameConstraintsPermitted, setFormNameConstraintsPermitted] = useState<string[]>([]);
+    const [formNameConstraintsExcluded, setFormNameConstraintsExcluded] = useState<string[]>([]);
+    // Local raw-text state for the textareas so blank lines / trailing whitespace survive
+    // mid-edit. Parsing into the committed arrays only happens on blur.
+    const [nameConstraintsPermittedText, setNameConstraintsPermittedText] = useState('');
+    const [nameConstraintsExcludedText, setNameConstraintsExcludedText] = useState('');
+    const nameConstraintsPermittedFocused = React.useRef(false);
+    const nameConstraintsExcludedFocused = React.useRef(false);
+
+    // Re-sync raw text when the committed arrays change externally (e.g. reset after create).
+    React.useEffect(() => {
+        if (!nameConstraintsPermittedFocused.current) {
+            setNameConstraintsPermittedText(formNameConstraintsPermitted.join('\n'));
+        }
+    }, [formNameConstraintsPermitted]);
+    React.useEffect(() => {
+        if (!nameConstraintsExcludedFocused.current) {
+            setNameConstraintsExcludedText(formNameConstraintsExcluded.join('\n'));
+        }
+    }, [formNameConstraintsExcluded]);
+
+    const commitNameConstraintsPermitted = () => {
+        nameConstraintsPermittedFocused.current = false;
+        const entries = nameConstraintsPermittedText
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean);
+        setNameConstraintsPermittedText(entries.join('\n'));
+        setFormNameConstraintsPermitted(entries);
+    };
+    const commitNameConstraintsExcluded = () => {
+        nameConstraintsExcludedFocused.current = false;
+        const entries = nameConstraintsExcludedText
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean);
+        setNameConstraintsExcludedText(entries.join('\n'));
+        setFormNameConstraintsExcluded(entries);
+    };
+
+    // Service URLs state
+    const [serviceUrlsExpanded, setServiceUrlsExpanded] = useState(false);
+    const [serviceUrls, setServiceUrls] = useState<ServiceUrls[]>([]);
+    const [serviceUrlsLoading, setServiceUrlsLoading] = useState(false);
+    const [serviceUrlsSaving, setServiceUrlsSaving] = useState<string | null>(null);
+
+    const flattenCas = (cas: any[]): any[] => {
+        const result: any[] = [];
+        for (const ca of cas) {
+            result.push(ca);
+            if (ca.children && ca.children.length > 0) {
+                result.push(...flattenCas(ca.children));
+            }
+        }
+        return result;
+    };
+
+    const loadAuthorities = () => {
+        setLoading(true);
+        setError(null);
+        apiGet<any>('/api/v1/admin/authorities/hierarchy')
+            .then((data) => {
+                const items = Array.isArray(data) ? data : (data.items || data.authorities || []);
+                setAuthorities(items);
+                const flat = flattenCas(items);
+                if (flat.length > 0 && !formParentCa) {
+                    setFormParentCa(flat[0].id || flat[0].certificateId || flat[0].name || '');
+                }
+                setLoading(false);
+            })
+            .catch((err) => {
+                setError(err.message || 'Failed to load authorities');
+                setLoading(false);
+            });
+    };
+
+    const loadServiceUrls = () => {
+        setServiceUrlsLoading(true);
+        apiGet<any>('/api/v1/admin/ca-service-urls')
+            .then((data) => {
+                const items = Array.isArray(data) ? data : (data.items || []);
+                setServiceUrls(items.map((s: any) => ({
+                    caId: s.caCertificateId || s.caId || '',
+                    publicBaseUrl: s.publicBaseUrl || '',
+                })));
+                setServiceUrlsLoading(false);
+            })
+            .catch(() => {
+                setServiceUrlsLoading(false);
+            });
+    };
+
+    useEffect(() => {
+        loadAuthorities();
+        loadServiceUrls();
+        apiGet<any>('/api/v1/admin/tenants')
+            .then(data => setTenants(Array.isArray(data) ? data : data.items || []))
+            .catch(() => {});
+        apiGet<any>('/api/v1/admin/cert-profiles?isCaProfile=true')
+            .then(data => {
+                const items = Array.isArray(data) ? data : (data.items || []);
+                setCaCertProfiles(items);
+                if (items.length > 0 && !formCertProfile) setFormCertProfile(items[0].id);
+            })
+            .catch(() => {});
+    }, []);
+
+    const allCasFlat = flattenCas(authorities);
+
+    const handleCreateCa = async () => {
+        if (!formTenant) {
+            setCreateError('Please select a tenant.');
+            return;
+        }
+        if (!formCN.trim()) {
+            setCreateError('Common Name is required.');
+            return;
+        }
+        if (formCaType === 'intermediate' && !formParentCa) {
+            setCreateError('Parent CA is required for intermediate CAs.');
+            return;
+        }
+        setCreateLoading(true);
+        setCreateError(null);
+        setCreateSuccess(null);
+
+        try {
+            const endpoint = formCaType === 'root'
+                ? '/api/v1/admin/authorities/create-root'
+                : '/api/v1/admin/authorities/create-intermediate';
+
+            const body: any = {
+                tenantId: formTenant,
+                subjectCN: formCN,
+                subjectO: formOrg || undefined,
+                subjectOU: formOU || undefined,
+                subjectL: formL || undefined,
+                subjectST: formST || undefined,
+                subjectC: formC || undefined,
+                keyAlgorithm: formKeyAlg,
+                keySize: parseInt(formKeySize, 10),
+                validityYears: parseInt(formValidityYears, 10),
+                label: formLabel || undefined,
+                certProfileId: formCertProfile || undefined,
+                publicBaseUrl: formPublicBaseUrl || undefined,
+                nameConstraintsPermitted: formNameConstraintsPermitted.length > 0 ? formNameConstraintsPermitted : null,
+                nameConstraintsExcluded: formNameConstraintsExcluded.length > 0 ? formNameConstraintsExcluded : null,
+            };
+
+            if (formCaType === 'intermediate') {
+                body.parentCaId = formParentCa;
+            }
+
+            const result = await apiPostWithMfa<any>(endpoint, body, requireStepUp, 'create-ca');
+
+            if (result?.requiresCeremony) {
+                showToast('info', result.message || 'A key ceremony has been created and requires approval before execution.');
+                setCreateSuccess(result.message || `Key ceremony created. ${result.requiredApprovals || 0} approval(s) required. View it in Key Ceremonies.`);
+                // Don't clear the form — user may want to review what was submitted
+                return;
+            }
+
+            setCreateSuccess(`${formCaType === 'root' ? 'Root' : 'Intermediate'} CA created successfully. ${result.message || ''}`);
+            setFormCN('');
+            setFormLabel('');
+            setFormOrg('');
+            setFormOU('');
+            setFormL('');
+            setFormST('');
+            setFormC('');
+            setFormNameConstraintsPermitted([]);
+            setFormNameConstraintsExcluded([]);
+            loadAuthorities();
+        } catch (err: any) {
+            setCreateError(err.message || 'Failed to create CA');
+        } finally {
+            setCreateLoading(false);
+        }
+    };
+
+    const handleSaveServiceUrls = async (su: ServiceUrls) => {
+        setServiceUrlsSaving(su.caId);
+        try {
+            await apiPut(`/api/v1/admin/ca-service-urls/${su.caId}`, {
+                publicBaseUrl: su.publicBaseUrl || null,
+            });
+            showToast('success', 'Public base URL saved');
+        } catch (err: any) {
+            showToast('error', err.message || 'Failed to save public base URL');
+        } finally {
+            setServiceUrlsSaving(null);
+        }
+    };
+
+    const updateServiceUrl = (caId: string, field: keyof ServiceUrls, value: string) => {
+        setServiceUrls((prev) =>
+            prev.map((s) => (s.caId === caId ? { ...s, [field]: value } : s))
+        );
+    };
+
+    const inputClass = 'w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500';
+    const labelClass = 'block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1';
+
+    return (
+        <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">CA Management</h1>
+
+            {/* Section 1: CA List */}
+            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Certificate Authorities</h3>
+                </div>
+                <div>
+                    {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
+                    {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
+                    {!loading && !error && allCasFlat.length === 0 && (
+                        <div className="p-4 text-sm text-gray-600 text-center">No certificate authorities found</div>
+                    )}
+                    {!loading && !error && allCasFlat.map((ca) => {
+                        const key = ca.id || ca.certificateId || ca.serialNumber || ca.name;
+                        const expanded = expandedCa === key;
+                        const typeBadge = caTypeBadge(ca);
+                        const enabled = ca.enabled !== false;
+                        const childrenCount = ca.children?.length || 0;
+
+                        return (
+                            <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
+                                <button
+                                    onClick={() => setExpandedCa(expanded ? null : key)}
+                                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
+                                >
+                                    <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
+                                    <StatusBadge status={typeBadge.status} label={typeBadge.label} />
+                                    <span className="text-sm text-gray-900 dark:text-white truncate">{ca.name || ca.subjectDN}</span>
+                                    {ca.tenantName && (
+                                        <span className="text-xs text-gray-600 bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded">{ca.tenantName}</span>
+                                    )}
+                                    <StatusBadge status={enabled ? 'enabled' : 'disabled'} label={enabled ? 'Enabled' : 'Disabled'} />
+                                    {childrenCount > 0 && (
+                                        <span className="text-xs text-gray-600">{childrenCount} child{childrenCount !== 1 ? 'ren' : ''}</span>
+                                    )}
+                                    <span className="ml-auto text-xs text-gray-600">Expires: {formatDate(ca.certificate?.notAfter || ca.notAfter)}</span>
+                                </button>
+                                {expanded && (
+                                    <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50 space-y-3">
+                                        {/* CA Info */}
+                                        <div>
+                                            <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">CA Information</span>
+                                            <DetailField label="Label" value={ca.label} mono />
+                                            {ca.tenantName && <DetailField label="Tenant" value={ca.tenantName} />}
+                                            <DetailField label="Default" value={ca.isDefault ? 'Yes' : 'No'} />
+                                            {ca.parentCaId && <DetailField label="Parent CA" value={ca.parentCaId} mono />}
+                                        </div>
+
+                                        {/* Cert Details — nested under ca.certificate from the API */}
+                                        {(() => {
+                                            const cert = ca.certificate;
+                                            if (!cert) return (
+                                                <div>
+                                                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Certificate Details</span>
+                                                    <div className="text-xs text-gray-600 mt-1">No certificate data available</div>
+                                                </div>
+                                            );
+
+                                            // Parse thumbprints JSON if present
+                                            let thumbprintDisplay = cert.thumbprints;
+                                            try {
+                                                const tp = JSON.parse(cert.thumbprints);
+                                                thumbprintDisplay = Object.entries(tp).map(([k, v]) => `${k}: ${v}`).join('\n');
+                                            } catch {}
+
+                                            // Parse key usages JSON
+                                            let keyUsages = '';
+                                            try { keyUsages = JSON.parse(cert.keyUsagesJson || '[]').join(', '); } catch {}
+
+                                            let ekuUsages = '';
+                                            try { ekuUsages = JSON.parse(cert.extendedKeyUsagesJson || '[]').join(', '); } catch {}
+
+                                            return (
+                                                <div>
+                                                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Certificate Details</span>
+                                                    <DetailField label="Subject" value={cert.subjectDN} />
+                                                    <DetailField label="Serial Number" value={cert.serialNumber} mono />
+                                                    <DetailField label="Issuer" value={cert.issuer} />
+                                                    <DetailField label="Not Before" value={formatDate(cert.notBefore)} />
+                                                    <DetailField label="Not After" value={formatDate(cert.notAfter)} />
+                                                    <DetailField label="Is CA" value={cert.isCA ? 'Yes' : 'No'} />
+                                                    <DetailField label="Revoked" value={cert.revoked ? `Yes (${cert.revocationReason})` : 'No'} />
+                                                    {keyUsages && <DetailField label="Key Usages" value={keyUsages} />}
+                                                    {ekuUsages && <DetailField label="Extended Key Usages" value={ekuUsages} />}
+                                                    <DetailField label="Thumbprints" value={thumbprintDisplay} mono />
+                                                </div>
+                                            );
+                                        })()}
+
+                                        {/* Protocol Configs */}
+                                        {ca.protocolConfigs && ca.protocolConfigs.length > 0 && (
+                                            <div>
+                                                <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Protocol Configurations</span>
+                                                <div className="mt-1 overflow-x-auto">
+                                                    <table className="w-full min-w-[600px] text-xs">
+                                                        <thead>
+                                                            <tr className="text-gray-600 border-b border-gray-300 dark:border-gray-700">
+                                                                <th className="text-left py-1 pr-4">Protocol</th>
+                                                                <th className="text-left py-1 pr-4">Enabled</th>
+                                                                <th className="text-left py-1">Profile</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {ca.protocolConfigs.map((pc: any, idx: number) => (
+                                                                <tr key={idx} className="border-b border-gray-300 dark:border-gray-700/50 last:border-b-0">
+                                                                    <td className="py-1 pr-4 text-gray-700 dark:text-gray-300">{pc.protocol || pc.name}</td>
+                                                                    <td className="py-1 pr-4">
+                                                                        <StatusBadge status={pc.enabled ? 'enabled' : 'disabled'} label={pc.enabled ? 'Yes' : 'No'} />
+                                                                    </td>
+                                                                    <td className="py-1 text-gray-600 dark:text-gray-400">{pc.signingProfileName || pc.signingProfile || pc.certProfile || '-'}</td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Service URLs */}
+                                        {ca.serviceUrls && (
+                                            <div>
+                                                <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Service URLs</span>
+                                                <DetailField label="Public Base URL" value={ca.serviceUrls.publicBaseUrl || '(not set)'} mono />
+                                                {ca.serviceUrls.publicBaseUrl && (
+                                                    <>
+                                                        <DetailField label="CDP" value={`${ca.serviceUrls.publicBaseUrl}/crl/${ca.label || ca.certificate?.serialNumber || ''}`} mono />
+                                                        <DetailField label="OCSP" value={`${ca.serviceUrls.publicBaseUrl}/ocsp`} mono />
+                                                        <DetailField label="CA Issuer" value={`${ca.serviceUrls.publicBaseUrl}/ca/${ca.label || ca.certificate?.serialNumber || ''}`} mono />
+                                                    </>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* OCSP Responder */}
+                                        {ca.ocspResponder && (
+                                            <div>
+                                                <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">OCSP Responder</span>
+                                                <DetailField label="URL" value={ca.ocspResponder.url} mono />
+                                                <DetailField label="Status" value={ca.ocspResponder.enabled ? 'Enabled' : 'Disabled'} />
+                                                <DetailField label="Signing Cert" value={ca.ocspResponder.signingCertSubject} />
+                                            </div>
+                                        )}
+
+                                        {/* Quick Links */}
+                                        <div className="flex gap-2 mt-1">
+                                            <Link to={`/authorities/${key}/ldap`}
+                                                className="px-3 py-1 text-xs bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border border-blue-300 dark:border-blue-700 rounded hover:bg-blue-900 transition-colors inline-block">
+                                                LDAP Publishers
+                                            </Link>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
+            {/* Section 2: Create Intermediate CA */}
+            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
+                <button
+                    onClick={() => setCreateExpanded(!createExpanded)}
+                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
+                >
+                    <span className="text-gray-600 text-xs">{createExpanded ? '▼' : '▶'}</span>
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Create Certificate Authority</h3>
+                </button>
+                {createExpanded && (
+                    <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
+                        {/* Tenant Selector */}
+                        <div>
+                            <label className={labelClass}>Tenant *</label>
+                            <select value={formTenant} onChange={(e) => setFormTenant(e.target.value)} className={inputClass}>
+                                <option value="">-- Select Tenant --</option>
+                                {tenants.filter(t => t.isEnabled).map(t => (
+                                    <option key={t.id} value={t.id}>{t.name}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* CA Type Toggle */}
+                        <div className="flex gap-2">
+                            <button
+                                onClick={() => { setFormCaType('root'); setFormValidityYears('25'); }}
+                                className={`px-4 py-1.5 text-xs font-semibold rounded transition-colors ${formCaType === 'root' ? 'bg-blue-600 text-gray-900 dark:text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-300 dark:hover:bg-gray-600'}`}
+                            >
+                                Root CA
+                            </button>
+                            <button
+                                onClick={() => { setFormCaType('intermediate'); setFormValidityYears('10'); }}
+                                className={`px-4 py-1.5 text-xs font-semibold rounded transition-colors ${formCaType === 'intermediate' ? 'bg-blue-600 text-gray-900 dark:text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-300 dark:hover:bg-gray-600'}`}
+                            >
+                                Intermediate CA
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <div>
+                                <label className={labelClass}>Common Name *</label>
+                                <input type="text" value={formCN} onChange={(e) => setFormCN(e.target.value)} placeholder={formCaType === 'root' ? 'My Root CA' : 'My Intermediate CA'} className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>Organization</label>
+                                <input type="text" value={formOrg} onChange={(e) => setFormOrg(e.target.value)} placeholder="Acme Corp" className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>Organizational Unit</label>
+                                <input type="text" value={formOU} onChange={(e) => setFormOU(e.target.value)} placeholder="IT Security" className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>Locality</label>
+                                <input type="text" value={formL} onChange={(e) => setFormL(e.target.value)} placeholder="San Francisco" className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>State</label>
+                                <input type="text" value={formST} onChange={(e) => setFormST(e.target.value)} placeholder="California" className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>Country</label>
+                                <input type="text" value={formC} onChange={(e) => setFormC(e.target.value)} placeholder="US" maxLength={2} className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>Key Algorithm</label>
+                                <select value={formKeyAlg} onChange={(e) => setFormKeyAlg(e.target.value)} className={inputClass}>
+                                    <option value="RSA">RSA</option>
+                                    <option value="ECDSA">ECDSA</option>
+                                    <option value="Ed25519">Ed25519</option>
+                                    <option value="Ed448">Ed448</option>
+                                    <option value="ML-DSA-44">ML-DSA-44</option>
+                                    <option value="ML-DSA-65">ML-DSA-65</option>
+                                    <option value="ML-DSA-87">ML-DSA-87</option>
+                                    <option value="SLH-DSA-SHA2-128F">SLH-DSA-SHA2-128F</option>
+                                </select>
+                            </div>
+                            {formKeyAlg !== 'Ed25519' && formKeyAlg !== 'Ed448' && !formKeyAlg.startsWith('ML-DSA') && !formKeyAlg.startsWith('SLH-DSA') && (
+                            <div>
+                                <label className={labelClass}>Key Size</label>
+                                <select value={formKeySize} onChange={(e) => setFormKeySize(e.target.value)} className={inputClass}>
+                                    {formKeyAlg === 'RSA' ? (
+                                        <>
+                                            <option value="2048">2048 bits</option>
+                                            <option value="3072">3072 bits</option>
+                                            <option value="4096">4096 bits</option>
+                                            <option value="7680">7680 bits (high compute)</option>
+                                            <option value="8192">8192 bits (high compute)</option>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <option value="256">P-256</option>
+                                            <option value="384">P-384</option>
+                                            <option value="521">P-521</option>
+                                        </>
+                                    )}
+                                </select>
+                                {formKeyAlg === 'RSA' && (formKeySize === '7680' || formKeySize === '8192') && (
+                                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                                        ⚠ High-compute RSA — key generation may take 30+ seconds.
+                                    </p>
+                                )}
+                            </div>
+                            )}
+                            <div>
+                                <label className={labelClass}>Validity (Years)</label>
+                                <input type="text" inputMode="numeric" value={formValidityYears} onChange={(e) => setFormValidityYears(e.target.value.replace(/\D/g, ''))} className={inputClass} />
+                            </div>
+                            <div>
+                                <label className={labelClass}>Label (optional, auto-generated from CN if empty)</label>
+                                <input type="text" value={formLabel} onChange={(e) => setFormLabel(e.target.value)} placeholder="my-intermediate-ca" className={inputClass} />
+                            </div>
+                            {formCaType === 'intermediate' && (
+                                <div>
+                                    <label className={labelClass}>Parent CA *</label>
+                                    <select value={formParentCa} onChange={(e) => setFormParentCa(e.target.value)} className={inputClass}>
+                                        {allCasFlat.length === 0 && <option value="">No CAs available</option>}
+                                        {allCasFlat.map((ca) => {
+                                            const id = ca.id || ca.certificateId || ca.name;
+                                            return (
+                                                <option key={id} value={id}>
+                                                    {ca.name || ca.subjectDN}
+                                                </option>
+                                            );
+                                        })}
+                                    </select>
+                                </div>
+                            )}
+                            <div>
+                                <label className={labelClass}>CA Certificate Profile</label>
+                                <select value={formCertProfile} onChange={(e) => setFormCertProfile(e.target.value)} className={inputClass}>
+                                    {caCertProfiles.length === 0 && <option value="">No CA profiles available</option>}
+                                    {caCertProfiles.map((p) => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Public Base URL — CDP/OCSP/AIA endpoints are auto-generated from this */}
+                        <div className="border-t border-gray-300 dark:border-gray-700 pt-4 mt-2">
+                            <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Public Base URL</span>
+                            <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                                The public host clients will use to fetch CRLs, OCSP responses, and the CA certificate (e.g.
+                                <code className="mono"> http://path2.ca.example.com</code>). The program auto-appends the
+                                standard short-URL paths at cert-build time to produce the CDP
+                                (<code className="mono">/crl/{'{label}'}</code>), OCSP (<code className="mono">/ocsp</code>),
+                                and AIA (<code className="mono">/ca/{'{label}'}</code>) extensions. Must be plain HTTP so
+                                clients can fetch without a chicken-and-egg TLS validation problem. Leave empty to issue
+                                certs without CDP/AIA extensions until a base URL is set later.
+                            </p>
+                            <div className="mt-2">
+                                <label className={labelClass}>Public Base URL</label>
+                                <input type="text" value={formPublicBaseUrl} onChange={(e) => setFormPublicBaseUrl(e.target.value)} placeholder="http://path2.ca.example.com" className={inputClass} />
+                            </div>
+                        </div>
+
+                        {/* Name Constraints — baked into the CA cert's NameConstraints extension and copied
+                            onto the per-CA signing profile. Each entry must be an RFC 5280 §4.2.1.10 general-name
+                            subtree; wildcards and regexes are NOT supported. */}
+                        <div className="border-t border-gray-300 dark:border-gray-700 pt-4 mt-2">
+                            <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Name Constraints</span>
+                            <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                                Restricts what subject names the new CA (and its children) may issue. Each entry is one of:
+                                <code className="font-mono"> DNS:.example.com</code>,
+                                <code className="font-mono"> IP:10.0.0.0/8</code>,
+                                <code className="font-mono"> Email:@example.com</code>,
+                                <code className="font-mono"> URI:https://example.com</code>, or
+                                <code className="font-mono"> DN:CN=...,O=...</code>.
+                                Wildcards and regexes are not supported &mdash; only RFC 5280 §4.2.1.10 general-name subtrees.
+                                Leave empty for no constraints.
+                            </p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                                <div>
+                                    <label className={labelClass}>Permitted name subtrees (one per line)</label>
+                                    <textarea
+                                        value={nameConstraintsPermittedText}
+                                        onChange={(e) => setNameConstraintsPermittedText(e.target.value)}
+                                        onFocus={() => { nameConstraintsPermittedFocused.current = true; }}
+                                        onBlur={commitNameConstraintsPermitted}
+                                        rows={5}
+                                        placeholder={'DNS:.example.com\nIP:10.0.0.0/8\nEmail:@example.com'}
+                                        className={`${inputClass} font-mono text-xs resize-y`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className={labelClass}>Excluded name subtrees (one per line)</label>
+                                    <textarea
+                                        value={nameConstraintsExcludedText}
+                                        onChange={(e) => setNameConstraintsExcludedText(e.target.value)}
+                                        onFocus={() => { nameConstraintsExcludedFocused.current = true; }}
+                                        onBlur={commitNameConstraintsExcluded}
+                                        rows={5}
+                                        placeholder={'DNS:.test.example.com\nURI:https://legacy.example.com'}
+                                        className={`${inputClass} font-mono text-xs resize-y`}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-4">
+                            <button
+                                onClick={handleCreateCa}
+                                disabled={createLoading || !formCN.trim() || !formTenant}
+                                className="px-6 py-2 text-sm font-semibold bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                            >
+                                {createLoading
+                                    ? (tenants.find(t => t.id === formTenant)?.requireKeyCeremony ? 'Starting Ceremony...' : 'Creating...')
+                                    : tenants.find(t => t.id === formTenant)?.requireKeyCeremony
+                                        ? `Start ${formCaType === 'root' ? 'Root' : 'Intermediate'} CA Ceremony`
+                                        : `Create ${formCaType === 'root' ? 'Root' : 'Intermediate'} CA`}
+                            </button>
+                        </div>
+
+                        {createError && (
+                            <div className="bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded p-3">
+                                <p className="text-sm text-red-800 dark:text-red-300">{createError}</p>
+                            </div>
+                        )}
+                        {createSuccess && (
+                            <div className="bg-green-50 dark:bg-green-900/30 border border-green-300 dark:border-green-700 rounded p-3">
+                                <p className="text-sm text-green-800 dark:text-green-300">{createSuccess}</p>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {/* Section 3: CA Service URLs */}
+            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
+                <button
+                    onClick={() => setServiceUrlsExpanded(!serviceUrlsExpanded)}
+                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
+                >
+                    <span className="text-gray-600 text-xs">{serviceUrlsExpanded ? '▼' : '▶'}</span>
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">CA Service URLs</h3>
+                </button>
+                {serviceUrlsExpanded && (
+                    <div className="border-t border-gray-300 dark:border-gray-700">
+                        {serviceUrlsLoading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
+                        {!serviceUrlsLoading && serviceUrls.length === 0 && (
+                            <div className="p-4 text-sm text-gray-600 text-center">No service URL configurations found</div>
+                        )}
+                        {!serviceUrlsLoading && serviceUrls.map((su) => {
+                            const caName = allCasFlat.find((ca) =>
+                                ca.certificateId === su.caId || ca.id === su.caId
+                            )?.name || su.caId;
+                            const saving = serviceUrlsSaving === su.caId;
+
+                            return (
+                                <div key={su.caId} className="p-4 border-b border-gray-300 dark:border-gray-700 last:border-b-0 space-y-3">
+                                    <span className="text-sm font-semibold text-gray-900 dark:text-white">{caName}</span>
+                                    <div>
+                                        <label className={labelClass}>Public Base URL</label>
+                                        <input
+                                            type="text"
+                                            value={su.publicBaseUrl}
+                                            onChange={(e) => updateServiceUrl(su.caId, 'publicBaseUrl', e.target.value)}
+                                            placeholder="http://path2.ca.example.com"
+                                            className={inputClass}
+                                        />
+                                    </div>
+                                    <p className="text-xs text-gray-600 dark:text-gray-400">
+                                        The program auto-appends <code className="mono">/crl/{'{label}'}</code>,
+                                        <code className="mono">/ocsp</code>, and <code className="mono">/ca/{'{label}'}</code>
+                                        at cert-build time. Must be plain HTTP so clients can fetch CRLs and OCSP responses
+                                        without the chicken-and-egg TLS validation problem. Leave empty to issue certs without
+                                        CDP/AIA extensions.
+                                    </p>
+                                    <button
+                                        onClick={() => handleSaveServiceUrls(su)}
+                                        disabled={saving}
+                                        className="px-4 py-1.5 text-xs font-semibold bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                    >
+                                        {saving ? 'Saving...' : 'Save'}
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+export default CaManagement;

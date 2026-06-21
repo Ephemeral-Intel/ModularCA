@@ -1,0 +1,229 @@
+import React, { useState, useEffect } from 'react';
+import { Link, useLocation } from 'react-router-dom';
+import { apiLogout } from '../api/client';
+import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
+import LogPanel from './LogPanel';
+
+interface NavItem {
+    name: string;
+    path: string;
+    icon: string;
+    /**
+     * Optional list of role levels the current user must hold
+     * for this nav item to render. Omit for entries every authenticated user can see.
+     * SystemAdmin satisfies any required role (matches AuthContext.hasAnyRole).
+     */
+    requiredRoles?: string[];
+}
+
+interface NavSection {
+    title: string;
+    items: NavItem[];
+}
+
+// Keep these role lists in sync with the matching ProtectedRoute
+// declarations in App.tsx so a hidden link cannot be reached by typing the URL.
+const ADMIN_ONLY = ['Administrator'];
+const ADMIN_OPERATOR = ['Administrator', 'Operator'];
+const ADMIN_AUDITOR = ['Administrator', 'Auditor'];
+
+const navSections: NavSection[] = [
+    {
+        title: 'Overview',
+        items: [
+            { name: 'Dashboard', path: '/dashboard', icon: '\u2302' },
+            { name: 'System Health', path: '/health', icon: '\u2665', requiredRoles: ADMIN_OPERATOR },
+            { name: 'My Security', path: '/security', icon: '\u2616' },
+        ]
+    },
+    {
+        title: 'Certificates',
+        items: [
+            { name: 'All Certificates', path: '/certificates', icon: '\u2387' },
+            { name: 'Request Certificate', path: '/certificates/request', icon: '+' },
+            { name: 'Pending Requests', path: '/certificates/requests', icon: '\u2709' },
+            { name: 'Search', path: '/certificates/search', icon: '\u2315' },
+            { name: 'Cert Inventory', path: '/intel/inventory', icon: '\u2690' },
+            { name: 'Vulnerabilities', path: '/intel/vulnerabilities', icon: '\u26A0', requiredRoles: ADMIN_OPERATOR },
+            { name: 'Compliance', path: '/intel/compliance', icon: '\u2611', requiredRoles: ADMIN_OPERATOR },
+            { name: 'Expiry Calendar', path: '/certificates/expiry', icon: '\u2612' },
+        ]
+    },
+    {
+        title: 'CA Management',
+        items: [
+            { name: 'Authorities', path: '/authorities/manage', icon: '\u26BF', requiredRoles: ADMIN_ONLY },
+            { name: 'Profiles', path: '/profiles', icon: '\u2630', requiredRoles: ADMIN_OPERATOR },
+            { name: 'Templates', path: '/templates', icon: '\u2702', requiredRoles: ADMIN_OPERATOR },
+            { name: 'CRL Management', path: '/crl', icon: '\u2716', requiredRoles: ADMIN_OPERATOR },
+            { name: 'Trust Anchors', path: '/trust-anchors', icon: '\u2693', requiredRoles: ADMIN_ONLY },
+            { name: 'Key Ceremonies', path: '/ceremonies', icon: '\u2638', requiredRoles: ADMIN_ONLY },
+            { name: 'SSH CA', path: '/ssh', icon: '\u2318' },
+            { name: 'Protocol Config', path: '/authorities/protocols', icon: '\u21C4', requiredRoles: ADMIN_ONLY },
+        ]
+    },
+    {
+        title: 'Access & Identity',
+        items: [
+            { name: 'Users', path: '/users', icon: '\u263A', requiredRoles: ADMIN_ONLY },
+            { name: 'Groups', path: '/groups', icon: '\u2302', requiredRoles: ADMIN_ONLY },
+            { name: 'Roles', path: '/roles', icon: '\u2606', requiredRoles: ADMIN_ONLY },
+            { name: 'Enrollment', path: '/enrollment', icon: '\u2611', requiredRoles: ADMIN_OPERATOR },
+            { name: 'ACME', path: '/acme', icon: 'A', requiredRoles: ADMIN_OPERATOR },
+        ]
+    },
+    {
+        title: 'Administration',
+        items: [
+            { name: 'Tenants', path: '/tenants', icon: '\u2616', requiredRoles: ADMIN_ONLY },
+            { name: 'Settings', path: '/settings', icon: '\u2699', requiredRoles: ADMIN_ONLY },
+            { name: 'Audit Logs', path: '/audit', icon: '\u2709', requiredRoles: ADMIN_AUDITOR },
+            { name: 'Notifications', path: '/notifications', icon: '\u2709', requiredRoles: ADMIN_OPERATOR },
+            { name: 'Quotas', path: '/quotas', icon: '\u2261', requiredRoles: ADMIN_ONLY },
+            { name: 'Whitelists', path: '/whitelists', icon: '\u26E8', requiredRoles: ADMIN_ONLY },
+            { name: 'Backup & Restore', path: '/backup', icon: '\u2B07', requiredRoles: ADMIN_ONLY },
+            { name: 'Schedules', path: '/schedules', icon: '\u29D6', requiredRoles: ADMIN_ONLY },
+            { name: 'Web TLS Certificate', path: '/webtls', icon: '\u26BF', requiredRoles: ADMIN_ONLY },
+        ]
+    }
+];
+
+const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const location = useLocation();
+    const { theme, toggleTheme } = useTheme();
+    const { hasAnyRole, loading: authLoading } = useAuth();
+    const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+
+    useEffect(() => {
+        setSidebarOpen(false);
+    }, [location.pathname]);
+
+    const toggleSection = (title: string) => {
+        setCollapsed(prev => ({ ...prev, [title]: !prev[title] }));
+    };
+
+    // Hide nav items the user cannot reach. While the auth
+    // context hydrates we render every link to avoid a content flash; the
+    // ProtectedRoute server-side gate is still authoritative.
+    const visibleSections = navSections
+        .map(section => ({
+            ...section,
+            items: section.items.filter(item => {
+                if (!item.requiredRoles || item.requiredRoles.length === 0) return true;
+                if (authLoading) return true;
+                return hasAnyRole(item.requiredRoles);
+            }),
+        }))
+        .filter(section => section.items.length > 0);
+
+    const sidebarContent = (
+        <nav className="w-56 h-full bg-white dark:bg-gray-950 text-gray-900 dark:text-white flex flex-col border-r border-gray-200 dark:border-gray-800 overflow-y-auto">
+            <div className="p-4 border-b border-gray-200 dark:border-gray-800 flex-shrink-0 flex items-center justify-between">
+                <Link to="/dashboard">
+                    <h2 className="text-lg font-bold text-blue-800 dark:text-blue-400">ModularCA</h2>
+                    <p className="text-xs text-gray-600">Administration</p>
+                </Link>
+                <button
+                    onClick={toggleTheme}
+                    className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors text-gray-600"
+                    title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+                >
+                    {theme === 'dark' ? (
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="5" strokeWidth="2"/><path strokeWidth="2" d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                    ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeWidth="2" d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
+                    )}
+                </button>
+            </div>
+
+            <div className="flex-1 py-2 overflow-y-auto">
+                {visibleSections.map(section => (
+                    <div key={section.title} className="mb-1">
+                        <button
+                            onClick={() => toggleSection(section.title)}
+                            className="w-full px-3 py-1.5 text-xs font-semibold text-gray-600 uppercase tracking-wider hover:text-gray-300 flex justify-between items-center"
+                        >
+                            {section.title}
+                            <span className="text-[10px]">{collapsed[section.title] ? '\u25B6' : '\u25BC'}</span>
+                        </button>
+
+                        {!collapsed[section.title] && (
+                            <ul className="px-2 space-y-0.5">
+                                {section.items.map(item => {
+                                    const isActive = location.pathname === item.path;
+                                    return (
+                                        <li key={item.path}>
+                                            <Link
+                                                to={item.path}
+                                                className={`flex items-center gap-2 px-3 py-1.5 rounded text-xs transition-colors ${
+                                                    isActive
+                                                        ? 'bg-blue-600/20 text-blue-800 dark:text-blue-300 border-l-2 border-blue-400'
+                                                        : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-200'
+                                                }`}
+                                            >
+                                                {item.name}
+                                            </Link>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+                    </div>
+                ))}
+            </div>
+
+            <div className="p-3 border-t border-gray-200 dark:border-gray-800 flex-shrink-0">
+                <button
+                    onClick={apiLogout}
+                    className="w-full px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors text-left"
+                >
+                    Logout
+                </button>
+            </div>
+        </nav>
+    );
+
+    return (
+        <div className="flex h-screen bg-gray-50 dark:bg-gray-900 overflow-hidden">
+            {/* Desktop sidebar */}
+            <div className="hidden lg:block flex-shrink-0">
+                {sidebarContent}
+            </div>
+
+            {/* Mobile sidebar overlay */}
+            {sidebarOpen && (
+                <div className="fixed inset-0 z-40 lg:hidden">
+                    <div className="absolute inset-0 bg-black/50" onClick={() => setSidebarOpen(false)} />
+                    <div className="relative w-56 h-full z-50">
+                        {sidebarContent}
+                    </div>
+                </div>
+            )}
+
+            <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+                {/* Mobile header with hamburger menu */}
+                <header className="lg:hidden flex items-center gap-3 px-4 py-3 bg-white dark:bg-gray-950 border-b border-gray-200 dark:border-gray-800">
+                    <button
+                        onClick={() => setSidebarOpen(true)}
+                        className="p-1.5 rounded-md text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"
+                    >
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                        </svg>
+                    </button>
+                    <span className="text-base font-bold text-blue-800 dark:text-blue-400">ModularCA</span>
+                    <span className="text-xs text-gray-600">Administration</span>
+                </header>
+
+                {/* Explicit landmark + id so a future skip-to-content link
+                    can target the main region. */}
+                <main id="content" role="main" className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900">{children}</main>
+                <LogPanel />
+            </div>
+        </div>
+    );
+};
+
+export default Layout;

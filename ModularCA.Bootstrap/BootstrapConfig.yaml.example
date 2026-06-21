@@ -1,0 +1,71 @@
+# === ModularCA Bootstrap YAML Configuration ===
+# Copy this to config/BootstrapConfig.yaml and customize before running:
+#   dotnet run --bootstrap
+# After bootstrap, delete this file (it contains sensitive credentials).
+
+CA:
+  Subject:
+    CN: "ModularCA Root CA"
+    O: "ModularCA"
+    OU: ["Infrastructure"]
+    DC: ["modularca", "local"]
+    L: "Austin"
+    ST: "Texas"
+    C: "US"
+
+  # Algorithms: RSA, ECDSA, Ed25519, Ed448, ML-DSA-44/65/87, SLH-DSA-SHA2-128F
+  Algorithm: ECDSA
+
+  # Key sizes: RSA(2048/3072/4096/7680/8192), ECDSA(256/384/521), others ignored
+  KeySize: 384
+
+  ValidityYears: 25
+
+SigningProfile:
+  Name: "default"
+  IsCa: true
+  KeyUsages:
+    - digitalSignature
+    - keyCertSign
+    - crlSign
+  ExtendedKeyUsages:
+    - 1.3.6.1.5.5.7.3.1  # TLS Web Server Authentication
+Features:
+  # Feature flags seeded into database. Changeable at runtime via admin API.
+  # ACME/EST/SCEP/CMP default to false so a first-run install does not
+  # expose an enrollment protocol the operator has not explicitly opted into. Flip to true
+  # here (or toggle in the admin UI after setup) only for protocols you actively need.
+  CRL: true
+  OCSP: true
+  ACME: false
+  EST: false
+  SCEP: false
+  CMP: false
+
+HttpsApi:
+  # TLS cert for the API, issued by the root CA. Auto-renewed by scheduler.
+  CN: "ModularCA API"
+  SANs:
+    - "DNS:localhost"
+    - "DNS:modularca.local"
+    - "IP:127.0.0.1"
+    - "IP:::1"
+  Port: 8443
+  ValidityYears: 2
+
+SqlRoot:
+  # Admin DB credentials — used only during bootstrap, never saved to config.yaml.
+  Host: "localhost"
+  Port: 3306
+  Username: "root"
+  Password: "your-root-password-here"
+
+SqlApp:
+  # App database. Dedicated user auto-created. Must NOT match SqlRoot.Username.
+  Database: "modularca-app"
+  Username: "modularca_app"
+
+SqlAudit:
+  # Audit database. Dedicated user auto-created with append-only permissions.
+  Database: "modularca-audit"
+  Username: "modularca_audit"

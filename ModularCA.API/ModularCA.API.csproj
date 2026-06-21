@@ -1,0 +1,92 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+	<TargetFramework>net10.0</TargetFramework>
+	<Nullable>enable</Nullable>
+	<ImplicitUsings>enable</ImplicitUsings>
+	<GenerateDocumentationFile>true</GenerateDocumentationFile>
+	<NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+<PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1" />
+	<PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="9.0.0" />
+	<PackageReference Include="Microsoft.AspNetCore.DataProtection.StackExchangeRedis" Version="9.0.0" />
+	<PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.5" />
+	<PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.14" />
+	<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.14">
+	  <PrivateAssets>all</PrivateAssets>
+	  <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+	</PackageReference>
+	<PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.14" />
+	<PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="10.0.5" />
+	<PackageReference Include="Microsoft.OpenApi" Version="2.4.1" />
+	<PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="9.0.0" />
+	<PackageReference Include="NCrontab.Signed" Version="3.4.0" />
+	<PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
+	<PackageReference Include="Serilog.AspNetCore" Version="10.0.0" />
+	<PackageReference Include="Serilog.Sinks.EventLog" Version="4.0.0" />
+	<PackageReference Include="Serilog.Sinks.Network" Version="3.0.0" />
+	<PackageReference Include="Serilog.Sinks.SyslogMessages" Version="4.1.0" />
+	<PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.7" />
+	<ProjectReference Include="..\ModularCA.Auth\ModularCA.Auth.csproj" />
+	<ProjectReference Include="..\ModularCA.Bootstrap\ModularCA.Bootstrap.csproj" />
+	<ProjectReference Include="..\ModularCA.Database\ModularCA.Database.csproj" />
+	<ProjectReference Include="..\ModularCA.Core\ModularCA.Core.csproj" />
+	<ProjectReference Include="..\ModularCA.Keystore\ModularCA.Keystore.csproj" />
+
+  </ItemGroup>
+
+  <!-- Build web UIs in Staging/Release configurations -->
+  <Target Name="BuildWebUIs" BeforeTargets="Build" Condition="'$(Configuration)' == 'Staging' OR '$(Configuration)' == 'Release'">
+    <!-- Admin UI -->
+    <Message Text="Building Admin UI..." Importance="high" />
+    <Exec Command="npm install --legacy-peer-deps" WorkingDirectory="$(ProjectDir)../modularca.adminui" />
+    <Exec Command="node_modules/.bin/vite build" WorkingDirectory="$(ProjectDir)../modularca.adminui" />
+
+    <!-- Public UI -->
+    <Message Text="Building Public UI..." Importance="high" />
+    <Exec Command="npm install --legacy-peer-deps" WorkingDirectory="$(ProjectDir)../modularca.publicui" />
+    <Exec Command="node_modules/.bin/vite build" WorkingDirectory="$(ProjectDir)../modularca.publicui" />
+
+    <!-- User UI -->
+    <Message Text="Building User UI..." Importance="high" />
+    <Exec Command="npm install --legacy-peer-deps" WorkingDirectory="$(ProjectDir)../modularca.userui" />
+    <Exec Command="node_modules/.bin/vite build" WorkingDirectory="$(ProjectDir)../modularca.userui" />
+
+    <!-- Setup UI -->
+    <Message Text="Building Setup UI..." Importance="high" />
+    <Exec Command="npm install --legacy-peer-deps" WorkingDirectory="$(ProjectDir)../modularca.setupui" />
+    <Exec Command="node_modules/.bin/vite build" WorkingDirectory="$(ProjectDir)../modularca.setupui" />
+
+    <!-- Docs UI -->
+    <Message Text="Building Docs UI..." Importance="high" />
+    <Exec Command="npm install --legacy-peer-deps" WorkingDirectory="$(ProjectDir)../modularca.docsui" />
+    <Exec Command="node_modules/.bin/vite build" WorkingDirectory="$(ProjectDir)../modularca.docsui" />
+  </Target>
+
+  <!-- Copy built web UIs to both source wwwroot and output directory -->
+  <Target Name="CopyWebUIs" AfterTargets="Build" Condition="'$(Configuration)' == 'Staging' OR '$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <AdminUIFiles Include="../modularca.adminui/dist/**/*" />
+      <PublicUIFiles Include="../modularca.publicui/dist/**/*" />
+      <UserUIFiles Include="../modularca.userui/dist/**/*" />
+      <SetupUIFiles Include="../modularca.setupui/dist/**/*" />
+      <DocsUIFiles Include="../modularca.docsui/dist/**/*" />
+    </ItemGroup>
+    <!-- Copy to source wwwroot (for subsequent builds) -->
+    <Copy SourceFiles="@(AdminUIFiles)" DestinationFolder="$(ProjectDir)wwwroot/admin/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(PublicUIFiles)" DestinationFolder="$(ProjectDir)wwwroot/public/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(UserUIFiles)" DestinationFolder="$(ProjectDir)wwwroot/user/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(SetupUIFiles)" DestinationFolder="$(ProjectDir)wwwroot/setup/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(DocsUIFiles)" DestinationFolder="$(ProjectDir)wwwroot/docs/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <!-- Copy to output directory (ensures current build has the files) -->
+    <Copy SourceFiles="@(AdminUIFiles)" DestinationFolder="$(OutputPath)wwwroot/admin/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(PublicUIFiles)" DestinationFolder="$(OutputPath)wwwroot/public/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(UserUIFiles)" DestinationFolder="$(OutputPath)wwwroot/user/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(SetupUIFiles)" DestinationFolder="$(OutputPath)wwwroot/setup/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(DocsUIFiles)" DestinationFolder="$(OutputPath)wwwroot/docs/%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Message Text="Web UIs copied to wwwroot and output directory" Importance="high" />
+  </Target>
+
+</Project>

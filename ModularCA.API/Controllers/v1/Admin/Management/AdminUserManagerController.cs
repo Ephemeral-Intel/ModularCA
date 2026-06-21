@@ -1,0 +1,383 @@
+using FluentValidation;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
+using ModularCA.API.Controllers.v1.Auth;
+using ModularCA.API.Middleware;
+using ModularCA.API.Validation.Users;
+using ModularCA.Auth.Interfaces;
+using ModularCA.Core.Services;
+using ModularCA.Database;
+using ModularCA.Shared.Enums;
+using ModularCA.Shared.Interfaces;
+using ModularCA.Shared.Models.Management;
+
+
+namespace ModularCA.API.Controllers.v1.Admin.Management
+{
+    /// <summary>
+    /// Admin endpoints for managing user accounts including creation, role assignment, and deletion.
+    /// </summary>
+    [ApiController]
+    [Route("api/v1/admin/users")]
+    [Authorize(Policy = "CaAuditor")]
+    public class AdminUserManagerController(
+        ModularCADbContext dbContext,
+        IUserManagementService userService,
+        ICurrentUserService currentUser,
+        IAuditService auditService,
+        IDistributedCache cache,
+        ISecurityAlertService alertService,
+        IValidator<CreateUserRequest> createValidator,
+        IValidator<UpdateUserRequest> updateValidator) : ControllerBase
+    {
+        private readonly ModularCADbContext _dbContext = dbContext;
+        private readonly IUserManagementService _userService = userService;
+        private readonly ICurrentUserService _currentUser = currentUser;
+        private readonly IAuditService _audit = auditService;
+        private readonly IDistributedCache _cache = cache;
+        private readonly ISecurityAlertService _alertService = alertService;
+        private readonly IValidator<CreateUserRequest> _createValidator = createValidator;
+        private readonly IValidator<UpdateUserRequest> _updateValidator = updateValidator;
+
+        /// <summary>
+        /// Retrieves all user accounts. Read-only; accessible to auditors.
+        /// </summary>
+        [HttpGet]
+        public async Task<IActionResult> GetUsers()
+        {
+            var users = await _userService.GetAllUsers();
+            return Ok(users);
+        }
+
+        /// <summary>
+        /// Retrieves a single user account by ID. Read-only; accessible to auditors.
+        /// </summary>
+        [HttpGet("{id:guid}")]
+        public async Task<IActionResult> GetUserById(Guid id)
+        {
+            var user = await _userService.GetUserById(id);
+            if (user == null)
+                return NotFound(new { message = $"User with ID {id} not found" });
+            return Ok(user);
+        }
+
+        /// <summary>
+        /// Retrieves a single user account by username. Read-only; accessible to auditors.
+        /// </summary>
+        [HttpGet("by-username/{username}")]
+        public async Task<IActionResult> GetUserByUsername(string username)
+        {
+            var user = await _userService.GetUserByUsername(username);
+            if (user == null)
+                return NotFound(new { message = $"User with username {username} not found" });
+            return Ok(user);
+        }
+
+        /// <summary>
+        /// Retrieves a single user account by email address. Read-only; accessible to auditors.
+        /// </summary>
+        [HttpGet("by-email")]
+        public async Task<IActionResult> GetUserByEmail([FromQuery] string email)
+        {
+            var user = await _userService.GetUserByEmail(email);
+            if (user == null)
+                return NotFound(new { message = $"User with email {email} not found" });
+            return Ok(user);
+        }
+
+        /// <summary>
+        /// Creates a new user account. Requires CaAdmin policy and step-up MFA verification via X-MFA-Token header.
+        /// </summary>
+        [HttpPost]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> CreateUser([FromBody] CreateUserRequest request,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.CreateUser))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            // Shape-validate username/email/name before touching the service.
+            // Normalize identity fields to NFC so the DB row matches the form the login path will see.
+            request.Username = UserFieldValidators.NormalizeIdentity(request.Username) ?? request.Username;
+            request.Email = UserFieldValidators.NormalizeIdentity(request.Email) ?? request.Email;
+            var createValidation = await _createValidator.ValidateAsync(request);
+            if (!createValidation.IsValid)
+                return BadRequest(new { error = string.Join("; ", createValidation.Errors.Select(e => e.ErrorMessage)) });
+
+            var (success, error) = await _userService.CreateUser(request);
+            if (success)
+            {
+                // Look up the created user to return their ID
+                var created = await _userService.GetUserByUsername(request.Username);
+                await _audit.LogAsync(AuditActionType.UserCreated, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "User", created?.Id.ToString(), new { request.Username, request.Email, request.GroupIds },
+                    HttpContext.Connection.RemoteIpAddress?.ToString());
+                return Ok(new { message = $"User {request.Username} created", id = created?.Id });
+            }
+            return BadRequest(new { error = error ?? $"Failed to create user {request.Username}" });
+        }
+
+        /// <summary>
+        /// Updates a user account (e.g. activate/deactivate). Requires CaAdmin policy and step-up MFA verification.
+        /// </summary>
+        [HttpPut("{id:guid}")]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> UpdateUser(Guid id, [FromBody] UpdateUserRequest request,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.UpdateUser, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            // Shape-validate any username/email that the caller is changing.
+            request.Username = UserFieldValidators.NormalizeIdentity(request.Username);
+            request.Email = UserFieldValidators.NormalizeIdentity(request.Email);
+            var updateValidation = await _updateValidator.ValidateAsync(request);
+            if (!updateValidation.IsValid)
+                return BadRequest(new { error = string.Join("; ", updateValidation.Errors.Select(e => e.ErrorMessage)) });
+
+            if (_currentUser.User?.Id == id && request.IsActive == false)
+                return BadRequest(new { error = "You cannot deactivate your own account" });
+            if (!(await _userService.UpdateUser(id, request)))
+                return NotFound(new { message = $"User with ID {id} not found" });
+            // Drop any cached stamp so the disable/lock change propagates
+            // to the next authenticated request instead of waiting 30 s for the cache TTL.
+            await TokenRevocationMiddleware.InvalidateUserStampCacheAsync(_cache, id);
+            await _audit.LogAsync(AuditActionType.UserUpdated, _currentUser.User?.Id, _currentUser.User?.Username,
+                "User", id.ToString(), sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString());
+            return Ok(new { message = $"User {id} updated" });
+        }
+
+        /// <summary>
+        /// Deletes a user account. Self-deletion is blocked. Requires CaAdmin policy and step-up MFA verification.
+        /// </summary>
+        [HttpDelete("{id:guid}")]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> DeleteUser(Guid id,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.DeleteUser, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            if (_currentUser.User?.Id == id)
+                return BadRequest(new { error = "You cannot delete your own account" });
+            if (await _userService.DeleteUser(id))
+            {
+                await _audit.LogAsync(AuditActionType.UserDeleted, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "User", id.ToString(), sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString());
+                return Ok(new { message = $"User {id} deleted" });
+            }
+            return NotFound(new { message = $"User with ID {id} not found" });
+        }
+
+        /// <summary>
+        /// Resets another user's password. Requires CaAdmin policy and step-up MFA verification via X-MFA-Token header.
+        /// </summary>
+        [HttpPost("{id:guid}/reset-password")]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> ResetUserPassword(Guid id,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+
+            // Require step-up MFA verification for resetting another user's password
+            if (_currentUser.User == null)
+                return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.ResetPassword, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            var newPassword = await _userService.ResetUserPassword(id);
+            if (newPassword != null)
+            {
+                // Rotate the stamp cache so outstanding JWTs are rejected
+                // on the next request rather than waiting out the TTL.
+                await TokenRevocationMiddleware.InvalidateUserStampCacheAsync(_cache, id);
+                await _audit.LogAsync(AuditActionType.UserPasswordReset, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "User", id.ToString(), sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString());
+                _ = _alertService.RaiseAlertAsync("AdminPasswordReset", AlertSeverity.Warning, $"Password reset for user {id} by {_currentUser.User?.Username}", new { TargetUserId = id });
+                return Ok(new { message = $"User {id} password reset", newPassword });
+            }
+            return NotFound(new { message = $"User with ID {id} not found" });
+        }
+
+        /// <summary>
+        /// Removes all MFA methods (TOTP secrets and WebAuthn credentials) for a user,
+        /// forcing them to re-enroll on next login. Requires step-up MFA verification
+        /// via X-MFA-Token header. Requires SystemOperator authorization policy.
+        /// </summary>
+        [HttpPost("{id:guid}/reset-mfa")]
+        [Authorize(Policy = "SystemOperator")]
+        public async Task<IActionResult> ResetUserMfa(Guid id,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+
+            if (_currentUser.User == null)
+                return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.ResetMfa, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            var user = await _dbContext.Users.FindAsync(id);
+            if (user == null)
+                return NotFound(new { message = $"User with ID {id} not found" });
+
+            // Remove all TOTP secrets
+            var totpSecrets = await _dbContext.TotpSecrets.Where(t => t.UserId == id).ToListAsync();
+            if (totpSecrets.Count > 0)
+                _dbContext.TotpSecrets.RemoveRange(totpSecrets);
+
+            // Remove all WebAuthn credentials
+            var webAuthnCreds = await _dbContext.Fido2Credentials.Where(c => c.UserId == id).ToListAsync();
+            if (webAuthnCreds.Count > 0)
+                _dbContext.Fido2Credentials.RemoveRange(webAuthnCreds);
+
+            // Reset MFA enrollment timestamp so user is forced to re-enroll
+            user.MfaEnrolledAt = null;
+
+            await _dbContext.SaveChangesAsync();
+
+            await _audit.LogAsync(AuditActionType.UserUpdated, _currentUser.User.Id, _currentUser.User.Username,
+                "User", id.ToString(),
+                new { Action = "MfaReset", TotpSecretsRemoved = totpSecrets.Count, WebAuthnCredentialsRemoved = webAuthnCreds.Count },
+                HttpContext.Connection.RemoteIpAddress?.ToString());
+
+            _ = _alertService.RaiseAlertAsync("UserMfaReset", AlertSeverity.Critical, $"MFA reset for user {id} by {_currentUser.User?.Username}", new { TargetUserId = id, TotpSecretsRemoved = totpSecrets.Count, WebAuthnCredentialsRemoved = webAuthnCreds.Count });
+            return Ok(new
+            {
+                message = $"MFA reset for user {id}",
+                totpSecretsRemoved = totpSecrets.Count,
+                webAuthnCredentialsRemoved = webAuthnCreds.Count
+            });
+        }
+
+        /// <summary>
+        /// Tiered authorization for membership writes.
+        /// <list type="number">
+        /// <item><b>Self-assignment always refused</b> — prevents bypass loops where a user
+        /// grants themselves into a higher tier.</item>
+        /// <item><b>system-super</b> members: may modify any group (system or CA-scoped).</item>
+        /// <item><b>system-admin</b> members (system-tenant, Administrator template): may
+        /// modify any org-tenant CA-scoped group. Cannot touch system-tenant groups — that
+        /// requires system-super.</item>
+        /// <item><b>CA-scoped admins</b> (org_&lt;ca&gt;_admin): may modify only groups whose
+        /// <c>CertificateAuthorityId</c> equals the CA they themselves admin. Cross-CA
+        /// promotion is refused — Alice, admin of CA-A, cannot add Bob to the admin group
+        /// of CA-B even though both groups are "non-system".</item>
+        /// </list>
+        /// Matches the industry norm (EJBCA per-CA access rules, ADCS per-CA Certificate
+        /// Manager scope, OpenXPKI per-realm admins): within-CA delegation works, cross-CA
+        /// and system-tier require explicit elevation.
+        /// </summary>
+        private async Task<IActionResult?> AuthorizeUserGroupChangeAsync(Guid groupId, Guid targetUserId)
+        {
+            if (_currentUser.User == null) return Unauthorized();
+            if (targetUserId == _currentUser.User.Id)
+                return BadRequest(new { error = "You cannot modify your own group membership. Ask a system-super admin to do it." });
+
+            var group = await _dbContext.CaGroups.FindAsync(groupId);
+            if (group == null) return NotFound(new { error = "Group not found" });
+
+            // Resolve the caller's relevant memberships once.
+            var callerId = _currentUser.User.Id;
+            var callerGroups = await _dbContext.CaGroupMembers
+                .Where(m => m.UserId == callerId)
+                .Include(m => m.Group)
+                .Select(m => new { m.Group!.Name, m.Group.IsSystemGroup, m.Group.IsSystemTierSuper, m.Group.CertificateAuthorityId, m.Group.TemplateName })
+                .ToListAsync();
+
+            // Tier checks read structural flags rather than literal group names so a
+            // future bootstrap rename doesn't silently bypass the gate.
+            var isSuper = callerGroups.Any(g => g.IsSystemTierSuper);
+            if (isSuper) return null; // global override
+
+            // System-tenant groups are only writable by system-super.
+            if (group.IsSystemGroup)
+                return StatusCode(403, new { error = "Modifying system-tenant group memberships requires system-super. system-admin/CaAdmin cannot grant system-tier access." });
+
+            // system-admin members (Administrator template on a system-tenant group) retain
+            // authority over ANY org-tenant CA-scoped group. Everyone else must be an admin
+            // on the specific CA that owns the target group. system-admin tier = any system
+            // group that is NOT the super tier.
+            var isSystemAdmin = callerGroups.Any(g => g.IsSystemGroup && !g.IsSystemTierSuper);
+            if (isSystemAdmin) return null;
+
+            var targetCaId = group.CertificateAuthorityId;
+            if (targetCaId == null)
+                return StatusCode(403, new { error = "This group is not CA-scoped and requires system-admin or system-super to modify." });
+
+            // CA-scoped admins: caller must be in an Administrator-template group for the
+            // same CA as the target. This is the within-CA delegation path.
+            var isAdminOnTargetCa = callerGroups.Any(g =>
+                g.CertificateAuthorityId == targetCaId
+                && string.Equals(g.TemplateName, "Administrator", StringComparison.OrdinalIgnoreCase));
+            if (!isAdminOnTargetCa)
+                return StatusCode(403, new { error = "Cross-CA group modification is not permitted. You can only manage memberships for groups on CAs where you are an admin." });
+
+            return null;
+        }
+
+        /// <summary>
+        /// Adds a user to a CA group by group ID. Requires CaAdmin policy and step-up MFA verification.
+        /// </summary>
+        [HttpPost("{id:guid}/groups/{groupId:guid}")]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> AddUserToGroup(Guid id, Guid groupId,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.AddGroupMember, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            var tierCheck = await AuthorizeUserGroupChangeAsync(groupId, id);
+            if (tierCheck != null) return tierCheck;
+
+            if (await _userService.AddUserToGroup(id, groupId, _currentUser.User?.Id))
+            {
+                // Group change rotates stamp — drop the cached entry.
+                await TokenRevocationMiddleware.InvalidateUserStampCacheAsync(_cache, id);
+                await _audit.LogAsync(AuditActionType.GroupMemberAdded, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "User", id.ToString(), new { GroupId = groupId },
+                    HttpContext.Connection.RemoteIpAddress?.ToString());
+                return Ok(new { message = $"User {id} added to group {groupId}" });
+            }
+            return BadRequest(new { message = $"Failed to add user {id} to group {groupId}" });
+        }
+
+        /// <summary>
+        /// Removes a user from a CA group by group ID. Requires CaAdmin policy and step-up MFA verification.
+        /// </summary>
+        [HttpDelete("{id:guid}/groups/{groupId:guid}")]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> RemoveUserFromGroup(Guid id, Guid groupId,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.RemoveGroupMember, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            var tierCheck = await AuthorizeUserGroupChangeAsync(groupId, id);
+            if (tierCheck != null) return tierCheck;
+
+            if (await _userService.RemoveUserFromGroup(id, groupId))
+            {
+                // Group change rotates stamp — drop the cached entry.
+                await TokenRevocationMiddleware.InvalidateUserStampCacheAsync(_cache, id);
+                await _audit.LogAsync(AuditActionType.GroupMemberRemoved, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "User", id.ToString(), new { GroupId = groupId },
+                    HttpContext.Connection.RemoteIpAddress?.ToString());
+                return Ok(new { message = $"User {id} removed from group {groupId}" });
+            }
+            return BadRequest(new { message = $"Failed to remove user {id} from group {groupId}" });
+        }
+
+    }
+}

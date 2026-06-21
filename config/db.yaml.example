@@ -1,0 +1,18 @@
+# === ModularCA Runtime Database Credentials ===
+# Auto-generated during bootstrap or setup wizard.
+# Contains least-privilege app credentials (not root).
+# This file survives --reset --force (DB users/grants are preserved).
+
+App:
+  Host: localhost
+  Port: 3306
+  Database: modularca-app
+  Username: modularca_app
+  Password: "auto-generated-by-bootstrap"
+
+Audit:
+  Host: localhost
+  Port: 3306
+  Database: modularca-audit
+  Username: modularca_audit
+  Password: "auto-generated-by-bootstrap"

@@ -1,0 +1,165 @@
+import React, { Suspense } from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import Layout from './components/Layout';
+import ProtectedRoute from './components/ProtectedRoute';
+import ErrorBoundary from './components/ErrorBoundary';
+import { StepUpMfaProvider } from './components/StepUpMfaContext';
+import { ThemeProvider } from './context/ThemeContext';
+import { ToastProvider } from './context/ToastContext';
+import { TenantProvider } from './context/TenantContext';
+import { AuthProvider } from './context/AuthContext';
+import ScrollToTop from './components/ScrollToTop';
+
+// Auth pages — eagerly loaded (entry points, must render immediately)
+import LoginPage from './pages/Login';
+import LoginBannerPage from './pages/LoginBanner';
+import MfaSetupPage from './pages/MfaSetup';
+import MfaVerifyPage from './pages/MfaVerify';
+import MfaCallbackPage from './pages/MfaCallback';
+
+// All other pages — lazily loaded per route
+const Dashboard = React.lazy(() => import('./pages/Dashboard'));
+const Certificates = React.lazy(() => import('./pages/Certificates'));
+const IssueCertificate = React.lazy(() => import('./pages/IssueCertificate'));
+const CertificateSearch = React.lazy(() => import('./pages/CertificateSearch'));
+const ExpiryCalendar = React.lazy(() => import('./pages/ExpiryCalendar'));
+const CertificateRequests = React.lazy(() => import('./pages/CertificateRequests'));
+const CaManagement = React.lazy(() => import('./pages/CaManagement'));
+const ProtocolConfig = React.lazy(() => import('./pages/ProtocolConfig'));
+const CrlManagement = React.lazy(() => import('./pages/CrlManagement'));
+const ProfileManagement = React.lazy(() => import('./pages/ProfileManagement'));
+const AcmeManagement = React.lazy(() => import('./pages/AcmeManagement'));
+const SshCertificates = React.lazy(() => import('./pages/SshCertificates'));
+const Users = React.lazy(() => import('./pages/Users'));
+const GroupManagement = React.lazy(() => import('./pages/GroupManagement'));
+const RoleManagement = React.lazy(() => import('./pages/RoleManagement'));
+const EnrollmentManagement = React.lazy(() => import('./pages/EnrollmentManagement'));
+const AuditLogs = React.lazy(() => import('./pages/AuditLogs'));
+const NotificationManagement = React.lazy(() => import('./pages/NotificationManagement'));
+const CertificateTemplates = React.lazy(() => import('./pages/CertificateTemplates'));
+const Settings = React.lazy(() => import('./pages/Settings'));
+const BackupRestore = React.lazy(() => import('./pages/BackupRestore'));
+const WebTlsManagement = React.lazy(() => import('./pages/WebTlsManagement'));
+const SystemHealth = React.lazy(() => import('./pages/SystemHealth'));
+const TrustAnchors = React.lazy(() => import('./pages/TrustAnchors'));
+const MySecurity = React.lazy(() => import('./pages/MySecurity'));
+const CertInventory = React.lazy(() => import('./pages/CertInventory'));
+const Vulnerabilities = React.lazy(() => import('./pages/Vulnerabilities'));
+const Compliance = React.lazy(() => import('./pages/Compliance'));
+const KeyCeremonies = React.lazy(() => import('./pages/KeyCeremonies'));
+const QuotaManagement = React.lazy(() => import('./pages/QuotaManagement'));
+const TenantManagement = React.lazy(() => import('./pages/TenantManagement'));
+const Whitelists = React.lazy(() => import('./pages/Whitelists'));
+const LdapPublishers = React.lazy(() => import('./pages/LdapPublishers'));
+const Schedules = React.lazy(() => import('./pages/Schedules'));
+const NotFound = React.lazy(() => import('./pages/NotFound'));
+
+// Role gating constants. Admin-only routes carry the role list
+// in App.tsx so a future doctrine change (e.g. allowing Operators into Settings) is
+// a single edit. Mirror these in Layout.tsx's sidenav definitions.
+const ADMIN_ONLY = ['Administrator'];
+const ADMIN_OPERATOR = ['Administrator', 'Operator'];
+
+const PageLoader = () => (
+    <div className="flex items-center justify-center h-64">
+        <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+    </div>
+);
+
+const App: React.FC = () => {
+    return (
+        <ErrorBoundary>
+            <ThemeProvider>
+                <ToastProvider>
+                    <AuthProvider>
+                        <TenantProvider>
+                            <Router basename="/admin">
+                                <ScrollToTop />
+                                <Routes>
+                                    <Route path="/banner" element={<LoginBannerPage />} />
+                                    <Route path="/login" element={<LoginPage />} />
+                                    <Route path="/mfa-setup" element={<MfaSetupPage />} />
+                                    <Route path="/mfa-verify" element={<MfaVerifyPage />} />
+                                    <Route path="/mfa-callback" element={<MfaCallbackPage />} />
+                                    <Route path="/*" element={
+                                        <ProtectedRoute>
+                                            <StepUpMfaProvider>
+                                                <Layout>
+                                                    <Suspense fallback={<PageLoader />}>
+                                                        <Routes>
+                                                            {/* Overview */}
+                                                            <Route path="/" element={<Dashboard />} />
+                                                            <Route path="/dashboard" element={<Dashboard />} />
+                                                            <Route path="/health" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><SystemHealth /></ProtectedRoute>} />
+
+                                                            {/* Certificates */}
+                                                            <Route path="/certificates" element={<Certificates />} />
+                                                            <Route path="/certificates/request" element={<IssueCertificate />} />
+                                                            <Route path="/certificates/search" element={<CertificateSearch />} />
+                                                            <Route path="/certificates/expiry" element={<ExpiryCalendar />} />
+                                                            <Route path="/certificates/requests" element={<CertificateRequests />} />
+
+                                                            {/* CA Management */}
+                                                            <Route path="/authorities/manage" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><CaManagement /></ProtectedRoute>} />
+                                                            <Route path="/authorities/protocols" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><ProtocolConfig /></ProtectedRoute>} />
+                                                            <Route path="/crl" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><CrlManagement /></ProtectedRoute>} />
+                                                            <Route path="/authorities/:caId/ldap" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><LdapPublishers /></ProtectedRoute>} />
+                                                            <Route path="/trust-anchors" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><TrustAnchors /></ProtectedRoute>} />
+
+                                                            {/* Profiles */}
+                                                            <Route path="/profiles" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><ProfileManagement /></ProtectedRoute>} />
+                                                            <Route path="/templates" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><CertificateTemplates /></ProtectedRoute>} />
+
+                                                            {/* Protocols */}
+                                                            <Route path="/acme" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><AcmeManagement /></ProtectedRoute>} />
+                                                            <Route path="/ssh" element={<SshCertificates />} />
+
+                                                            {/* Access Control */}
+                                                            <Route path="/users" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><Users /></ProtectedRoute>} />
+                                                            <Route path="/groups" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><GroupManagement /></ProtectedRoute>} />
+                                                            <Route path="/roles" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><RoleManagement /></ProtectedRoute>} />
+                                                            <Route path="/enrollment" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><EnrollmentManagement /></ProtectedRoute>} />
+                                                            <Route path="/ceremonies" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><KeyCeremonies /></ProtectedRoute>} />
+                                                            <Route path="/quotas" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><QuotaManagement /></ProtectedRoute>} />
+
+                                                            {/* Intelligence */}
+                                                            <Route path="/intel/inventory" element={<CertInventory />} />
+                                                            <Route path="/intel/vulnerabilities" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><Vulnerabilities /></ProtectedRoute>} />
+                                                            <Route path="/intel/compliance" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><Compliance /></ProtectedRoute>} />
+
+                                                            {/* Monitoring */}
+                                                            <Route path="/audit" element={<ProtectedRoute requiredRoles={['Administrator', 'Auditor']}><AuditLogs /></ProtectedRoute>} />
+                                                            <Route path="/notifications" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><NotificationManagement /></ProtectedRoute>} />
+
+                                                            {/* My Account */}
+                                                            <Route path="/security" element={<MySecurity />} />
+
+                                                            {/* Administration */}
+                                                            <Route path="/tenants" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><TenantManagement /></ProtectedRoute>} />
+                                                            <Route path="/whitelists" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><Whitelists /></ProtectedRoute>} />
+                                                            <Route path="/settings" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><Settings /></ProtectedRoute>} />
+                                                            <Route path="/backup" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><BackupRestore /></ProtectedRoute>} />
+                                                            <Route path="/schedules" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><Schedules /></ProtectedRoute>} />
+                                                            <Route path="/webtls" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><WebTlsManagement /></ProtectedRoute>} />
+
+                                                            {/* Catch-all 404 — must come last. Renders inside the authenticated
+                                                                Layout so the operator keeps the sidebar and tenant context
+                                                                while seeing the page-not-found message. */}
+                                                            <Route path="*" element={<NotFound />} />
+                                                        </Routes>
+                                                    </Suspense>
+                                                </Layout>
+                                            </StepUpMfaProvider>
+                                        </ProtectedRoute>
+                                    } />
+                                </Routes>
+                            </Router>
+                        </TenantProvider>
+                    </AuthProvider>
+                </ToastProvider>
+            </ThemeProvider>
+        </ErrorBoundary>
+    );
+};
+
+export default App;

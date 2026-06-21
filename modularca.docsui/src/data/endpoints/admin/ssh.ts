@@ -1,0 +1,148 @@
+import type { ApiEndpoint } from '../types';
+
+export const adminSsh: ApiEndpoint[] = [
+    {
+        method: 'GET',
+        path: '/api/v1/admin/ssh/ca-keys',
+        summary: 'List all SSH CA keys with metadata, including public KRL and public key download URLs.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'Array of SSH CA keys with ID, name, key type, key size, public key, isUserCa, isHostCa, maxValidityHours, isEnabled, createdAt, KRL URL, and public key URL.',
+    },
+    {
+        method: 'POST',
+        path: '/api/v1/admin/ssh/ca-keys',
+        summary: 'Generate a new SSH CA key pair. If the target tenant requires key ceremonies, initiates a ceremony instead.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        requestBody: [
+            { name: 'name', type: 'string', required: true, description: 'Name for the SSH CA key' },
+            { name: 'keyType', type: 'string', required: false, description: 'Key type: ed25519 (default), ecdsa, or rsa' },
+            { name: 'keySize', type: 'int', required: false, description: 'Key size in bits. RSA: 2048/3072/4096/7680/8192. ECDSA: 256/384/521. Ignored for ed25519' },
+            { name: 'isUserCa', type: 'bool', required: false, description: 'Allow user certificate signing (default: true)' },
+            { name: 'isHostCa', type: 'bool', required: false, description: 'Allow host certificate signing (default: false)' },
+            { name: 'maxValidityHours', type: 'int', required: false, description: 'Maximum certificate validity in hours (default: 24)' },
+            { name: 'tenantId', type: 'guid', required: false, description: 'Tenant ID. If the tenant requires key ceremonies, a ceremony is initiated instead of immediate creation' },
+        ],
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+            { name: 'X-MFA-Token', type: 'string', required: true, description: 'Step-up MFA token from /api/v1/auth/mfa/verify-stepup' },
+        ],
+        responseDescription: 'Created SSH CA key with ID, name, key type, key size, public key, and createdAt. If ceremony required: { requiresCeremony, ceremonyId, status, requiredApprovals, message }.',
+    },
+    {
+        method: 'GET',
+        path: '/api/v1/admin/ssh/ca-keys/{id}/public-key',
+        summary: 'Get the public key text for an SSH CA key.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'SSH public key as plain text.',
+    },
+    {
+        method: 'POST',
+        path: '/api/v1/admin/ssh/ca-keys/{caKeyId}/certificates/sign-user',
+        summary: 'Sign a user public key, producing an SSH user certificate.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        requestBody: [
+            { name: 'publicKey', type: 'string', required: true, description: 'User\'s SSH public key to sign' },
+            { name: 'principals', type: 'string[]', required: true, description: 'List of principals (usernames)' },
+            { name: 'sshSigningProfileId', type: 'guid', required: true, description: 'SSH signing profile ID' },
+            { name: 'sshCertProfileId', type: 'guid', required: true, description: 'SSH cert profile ID' },
+            { name: 'validityHours', type: 'int', required: false, description: 'Optional validity duration in hours' },
+            { name: 'keyId', type: 'string', required: false, description: 'Optional key identifier' },
+            { name: 'extensions', type: 'string[]', required: false, description: 'Optional SSH extensions' },
+        ],
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'Signed SSH certificate with ID, key ID, serial, certificate content, and validity.',
+        notes: 'The CA key in the path must match the signing profile\'s assigned CA key.',
+    },
+    {
+        method: 'POST',
+        path: '/api/v1/admin/ssh/ca-keys/{caKeyId}/certificates/sign-host',
+        summary: 'Sign a host public key, producing an SSH host certificate.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        requestBody: [
+            { name: 'publicKey', type: 'string', required: true, description: 'Host\'s SSH public key to sign' },
+            { name: 'hostnames', type: 'string[]', required: true, description: 'List of hostnames' },
+            { name: 'sshSigningProfileId', type: 'guid', required: true, description: 'SSH signing profile ID' },
+            { name: 'sshCertProfileId', type: 'guid', required: true, description: 'SSH cert profile ID' },
+            { name: 'validityHours', type: 'int', required: false, description: 'Optional validity duration in hours' },
+            { name: 'keyId', type: 'string', required: false, description: 'Optional key identifier' },
+        ],
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'Signed SSH host certificate with ID, key ID, serial, certificate content, and validity.',
+        notes: 'The CA key in the path must match the signing profile\'s assigned CA key.',
+    },
+    {
+        method: 'GET',
+        path: '/api/v1/admin/ssh/ca-keys/{caKeyId}/certificates',
+        summary: 'List issued SSH certificates for a specific CA key with pagination.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        queryParams: [
+            { name: 'page', type: 'int', required: false, description: 'Page number (default: 1)' },
+            { name: 'pageSize', type: 'int', required: false, description: 'Page size (default: 50)' },
+        ],
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'Paginated array of SSH certificates.',
+    },
+    {
+        method: 'GET',
+        path: '/api/v1/admin/ssh/certificates/{id}/download',
+        summary: 'Download a signed SSH certificate as a text file.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'SSH certificate content as text file download.',
+    },
+    {
+        method: 'GET',
+        path: '/api/v1/admin/ssh/ca-keys/{id}/krl',
+        summary: 'Download the binary Key Revocation List (KRL) for an SSH CA key.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'Binary KRL file download (application/octet-stream).',
+    },
+    {
+        method: 'POST',
+        path: '/api/v1/admin/ssh/ca-keys/{caKeyId}/certificates/{id}/revoke',
+        summary: 'Revoke an SSH certificate by ID, scoped to a specific CA key.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+        ],
+        responseDescription: 'Revocation confirmation message.',
+    },
+    {
+        method: 'DELETE',
+        path: '/api/v1/admin/ssh/ca-keys/{id}',
+        summary: 'Disable an SSH CA key and revoke all active certificates issued by it. Requires step-up MFA. If the CA\'s tenant requires key ceremonies, initiates a ceremony instead.',
+        auth: 'Authorize (CaOperator)',
+        category: 'Admin SSH',
+        headers: [
+            { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
+            { name: 'X-MFA-Token', type: 'string', required: true, description: 'Step-up MFA token from /api/v1/auth/mfa/verify-stepup' },
+        ],
+        responseDescription: 'Confirmation that the SSH CA key was disabled and all certificates revoked. If ceremony required: { requiresCeremony, ceremonyId, message }.',
+    },
+];

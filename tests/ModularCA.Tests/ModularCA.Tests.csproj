@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Don't surface compiler warnings from test code as fatal during early authoring. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Test framework + runner. xUnit is the .NET-idiomatic choice and is what every code
+         example we'll write here assumes (Fact / Theory / fixtures). xunit.runner.visualstudio
+         is what makes `dotnet test` actually discover the tests. -->
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.0.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+
+    <!-- EF Core in-memory provider so unit tests can spin up a clean ModularCADbContext per test
+         without a MySQL container. Suitable for entity-shape tests, query-builder tests, and most
+         service-level tests. Integration tests that exercise actual MySQL semantics (raw SQL,
+         migrations, JSON columns) belong in a separate ModularCA.IntegrationTests project later.
+         Explicit Relational pin matches what the production csproj uses so MSBuild doesn't
+         flag a 9.0.0 vs 9.0.14 transitive conflict from Pomelo's older transitive reference. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="9.0.14" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.14" />
+
+    <!-- Microsoft.Extensions.* doubles. Used to inject a NullLogger or fake TimeProvider into
+         services under test. The TimeProvider sweep we just finished pays off here. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.5" />
+
+    <!-- coverlet.collector is intentionally NOT added yet. Coverage reports become useful once
+         we have a meaningful test surface; adding it before that produces noisy 0% reports. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Project references. The test project references every production library so any class
+         under test is reachable without per-suite csproj edits. ModularCA.API is intentionally
+         omitted — it's the host executable, not a library; controller tests will get a separate
+         ModularCA.IntegrationTests project with WebApplicationFactory<>. -->
+    <ProjectReference Include="..\..\ModularCA.Shared\ModularCA.Shared.csproj" />
+    <ProjectReference Include="..\..\ModularCA.Database\ModularCA.Database.csproj" />
+    <ProjectReference Include="..\..\ModularCA.Keystore\ModularCA.Keystore.csproj" />
+    <ProjectReference Include="..\..\ModularCA.Core\ModularCA.Core.csproj" />
+    <ProjectReference Include="..\..\ModularCA.Auth\ModularCA.Auth.csproj" />
+    <ProjectReference Include="..\..\ModularCA.Bootstrap\ModularCA.Bootstrap.csproj" />
+  </ItemGroup>
+
+</Project>

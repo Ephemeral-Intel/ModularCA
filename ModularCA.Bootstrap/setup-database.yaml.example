@@ -1,0 +1,15 @@
+# Root database credentials for initial setup
+# This file is deleted after successful setup (root creds are no longer needed)
+SqlRoot:
+  Host: localhost
+  Port: 3306
+  Username: root
+  Password: "your-root-password-here"
+
+SqlApp:
+  Database: modularca-app
+  Username: modularca_app
+
+SqlAudit:
+  Database: modularca-audit
+  Username: modularca_audit

@@ -1,0 +1,343 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Mvc.Filters;
+using ModularCA.Database;
+using ModularCA.Shared.Authorization;
+using Serilog;
+
+namespace ModularCA.Auth.Authorization;
+
+/// <summary>
+/// Authorization handler that evaluates <see cref="CaGroupRequirement"/> against the
+/// current user's group memberships. Extracts the target CA from route values when the
+/// requirement is CA-scoped.
+/// <para>
+/// CA-scoped policies no longer silently degrade to system-level
+/// checks when the route has no resolvable CA id. If the requirement is CA-scoped and
+/// no CA can be resolved from the route, the handler returns without succeeding — a
+/// warning is logged so developers notice the drift. Endpoints that legitimately need
+/// system-level access must use <c>Policy = "SystemOperator"</c> / <c>"SystemAdmin"</c>
+/// / <c>"SystemAuditor"</c> (<see cref="CaGroupRequirement.IsSystemOnly"/>) instead of
+/// relying on the former implicit fallback.
+/// </para>
+/// <para>
+/// Resolved CA ids are cached on <c>HttpContext.Items</c> so downstream
+/// controllers can reuse the lookup without a second DB round-trip.
+/// </para>
+/// </summary>
+public class CaGroupAuthorizationHandler : AuthorizationHandler<CaGroupRequirement>
+{
+    internal const string ResolvedCaIdKey = "ResolvedCaId";
+    private readonly ICaGroupAuthorizationService _authService;
+    private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly ModularCADbContext _db;
+    private readonly ILogger<CaGroupAuthorizationHandler> _logger;
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="CaGroupAuthorizationHandler"/>.
+    /// </summary>
+    public CaGroupAuthorizationHandler(
+        ICaGroupAuthorizationService authService,
+        IHttpContextAccessor httpContextAccessor,
+        ModularCADbContext db,
+        ILogger<CaGroupAuthorizationHandler> logger)
+    {
+        _authService = authService;
+        _httpContextAccessor = httpContextAccessor;
+        _db = db;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Evaluates the <see cref="CaGroupRequirement"/> for the authenticated user.
+    /// For system-only requirements, checks system group memberships.
+    /// For CA-scoped requirements, resolves the CA from route values and checks CA-level access.
+    /// Fails closed when a CA-scoped policy is evaluated on a route
+    /// with no resolvable CA id.
+    /// </summary>
+    protected override async Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        CaGroupRequirement requirement)
+    {
+        var userId = GetUserId(context.User);
+        if (userId == null)
+            return;
+
+        var username = context.User?.FindFirst(ClaimTypes.Name)?.Value
+                    ?? context.User?.FindFirst(JwtRegisteredClaimNames.UniqueName)?.Value
+                    ?? "(unknown)";
+
+        // System-only policies: only check system group grants
+        if (requirement.IsSystemOnly)
+        {
+            if (await _authService.HasSystemCapabilityAsync(userId.Value, requirement.RequiredCapability))
+            {
+                context.Succeed(requirement);
+            }
+            else
+            {
+                LogAuthorizationDenied(userId.Value, username, requirement.RequiredCapability, context);
+            }
+            return;
+        }
+
+        // CA-scoped: try to extract CA ID from route values
+        var caId = await ResolveCaIdFromRouteAsync();
+
+        if (caId != null)
+        {
+            // CA ID found in route — check CA-level access (includes system.manage bypass)
+            if (await _authService.HasCaCapabilityAsync(userId.Value, caId.Value, requirement.RequiredCapability))
+            {
+                context.Succeed(requirement);
+            }
+            else
+            {
+                LogAuthorizationDenied(userId.Value, username, requirement.RequiredCapability, context);
+            }
+            return;
+        }
+
+        // No CA ID in route — this is a listing/cross-CA endpoint (e.g. /admin/certificates,
+        // /admin/authorities). Check if the user has the required capability for ANY CA they
+        // belong to. The endpoint itself filters results by tenant/CA access.
+        if (await _authService.IsSystemAdminAsync(userId.Value))
+        {
+            context.Succeed(requirement);
+            return;
+        }
+
+        // Check if the user holds the required capability on any CA via their group memberships
+        var accessibleCaIds = await _authService.GetAccessibleCaIdsAsync(userId.Value, requirement.RequiredCapability);
+        if (accessibleCaIds.Count > 0)
+        {
+            context.Succeed(requirement);
+            return;
+        }
+
+        LogAuthorizationDenied(userId.Value, username, requirement.RequiredCapability, context);
+    }
+
+    /// <summary>
+    /// Logs an authorization denial via Serilog at Warning level, including user identity,
+    /// the required capability, and the HTTP method/path when available from the request context.
+    /// ALC-11: ensures authorization failures carry full user context for audit purposes.
+    /// </summary>
+    private void LogAuthorizationDenied(Guid userId, string username, string capability, AuthorizationHandlerContext context)
+    {
+        var httpContext = _httpContextAccessor.HttpContext;
+        var method = httpContext?.Request.Method ?? "(unknown)";
+        var path = httpContext?.Request.Path.Value ?? "(unknown)";
+        var remoteIp = httpContext?.Connection.RemoteIpAddress?.ToString() ?? "(unknown)";
+
+        Log.Warning(
+            "Authorization denied for user {UserId} ({Username}) on {Method} {Resource} from {RemoteIp} — required capability: {Capability}",
+            userId, username, method, path, remoteIp, capability);
+    }
+
+    /// <summary>
+    /// Extracts the user ID from the JWT <c>sub</c> or <c>nameid</c> claim.
+    /// </summary>
+    private static Guid? GetUserId(ClaimsPrincipal? principal)
+    {
+        if (principal == null)
+            return null;
+
+        var sub = principal.FindFirst(ClaimTypes.NameIdentifier)?.Value
+               ?? principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
+
+        return Guid.TryParse(sub, out var guid) ? guid : null;
+    }
+
+    /// <summary>
+    /// Attempts to resolve a CA ID from the current HTTP request route values.
+    /// Resolution order is
+    /// <list type="number">
+    ///   <item><c>caId</c> (explicit CA primary key)</item>
+    ///   <item><c>caKeyId</c> (SSH CA key → parent CA)</item>
+    ///   <item><c>label</c> (per-tenant URL slug)</item>
+    ///   <item><c>caCertificateId</c> (CA certificate → CA record)</item>
+    ///   <item><c>certId</c> (issued cert → signing profile → CA)</item>
+    ///   <item><c>serial</c> (issued cert serial → signing profile → CA)</item>
+    ///   <item><c>csrId</c> (CSR → signing profile → CA)</item>
+    ///   <item><c>tokenId</c> (enrollment token → stored tenant/CA)</item>
+    ///   <item><c>id</c> + path hint (cert/request/signing-profile endpoints)</item>
+    /// </list>
+    /// The result is cached on
+    /// <c>HttpContext.Items["ResolvedCaId"]</c> so controllers can reuse the lookup
+    /// without re-querying the database.
+    /// </summary>
+    private async Task<Guid?> ResolveCaIdFromRouteAsync()
+    {
+        var httpContext = _httpContextAccessor.HttpContext;
+        if (httpContext == null)
+            return null;
+
+        // Return the cached value when the same request already resolved
+        // the CA id earlier (e.g. in a prior policy evaluation).
+        if (httpContext.Items.TryGetValue(ResolvedCaIdKey, out var cached) && cached is Guid cachedId)
+            return cachedId;
+
+        var resolved = await ResolveCaIdFromRouteCoreAsync(httpContext);
+        if (resolved != null)
+            httpContext.Items[ResolvedCaIdKey] = resolved.Value;
+        return resolved;
+    }
+
+    private async Task<Guid?> ResolveCaIdFromRouteCoreAsync(HttpContext httpContext)
+    {
+        var routeValues = httpContext.Request.RouteValues;
+        var path = httpContext.Request.Path.Value ?? "";
+
+        // Try caId route value (explicit CA identifier)
+        if (TryGetGuid(routeValues, "caId", out var caId))
+            return caId;
+
+        // Try caKeyId route value — resolve SSH CA key to its parent CA
+        if (TryGetGuid(routeValues, "caKeyId", out var caKeyId))
+        {
+            var sshCaKey = await _db.SshCaKeys.AsNoTracking().FirstOrDefaultAsync(k => k.Id == caKeyId);
+            if (sshCaKey != null)
+                return sshCaKey.CertificateAuthorityId;
+        }
+
+        // Try label route value — resolve to CA ID via database
+        if (routeValues.TryGetValue("label", out var labelObj) && labelObj != null)
+        {
+            var label = labelObj.ToString();
+            if (!string.IsNullOrWhiteSpace(label))
+            {
+                var ca = await _db.CertificateAuthorities
+                    .AsNoTracking()
+                    .IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(c => c.Label == label);
+                return ca?.Id;
+            }
+        }
+
+        // caCertificateId → CertificateAuthority
+        if (TryGetGuid(routeValues, "caCertificateId", out var caCertId))
+        {
+            var caFromCert = await _db.CertificateAuthorities
+                .AsNoTracking()
+                .IgnoreQueryFilters()
+                .FirstOrDefaultAsync(c => c.CertificateId == caCertId);
+            if (caFromCert != null) return caFromCert.Id;
+        }
+
+        // certId / serial / csrId → SigningProfile → CA
+        if (TryGetGuid(routeValues, "certId", out var certId))
+        {
+            var ca = await ResolveCaFromCertIdAsync(certId);
+            if (ca != null) return ca;
+        }
+        if (routeValues.TryGetValue("serial", out var serialObj) && serialObj != null)
+        {
+            var serial = serialObj.ToString();
+            if (!string.IsNullOrWhiteSpace(serial))
+            {
+                var ca = await ResolveCaFromSerialAsync(serial);
+                if (ca != null) return ca;
+            }
+        }
+        if (TryGetGuid(routeValues, "csrId", out var csrId))
+        {
+            var ca = await ResolveCaFromCsrIdAsync(csrId);
+            if (ca != null) return ca;
+        }
+
+        // tokenId → EnrollmentToken.CertificateAuthorityId
+        if (TryGetGuid(routeValues, "tokenId", out var tokenId))
+        {
+            var token = await _db.EnrollmentTokens.AsNoTracking().FirstOrDefaultAsync(t => t.Id == tokenId);
+            if (token?.CertificateAuthorityId != null) return token.CertificateAuthorityId;
+        }
+
+        // Profile endpoints with {id} parameter + path hint
+        if (TryGetGuid(routeValues, "id", out var idGuid))
+        {
+            if (path.Contains("/cert-profiles/", StringComparison.OrdinalIgnoreCase))
+            {
+                var cp = await _db.CertProfiles
+                    .AsNoTracking()
+                    .IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(p => p.Id == idGuid);
+                if (cp?.CertificateAuthorityId != null) return cp.CertificateAuthorityId;
+            }
+            else if (path.Contains("/request-profiles/", StringComparison.OrdinalIgnoreCase))
+            {
+                var rp = await _db.RequestProfiles.AsNoTracking().FirstOrDefaultAsync(p => p.Id == idGuid);
+                if (rp?.CertificateAuthorityId != null) return rp.CertificateAuthorityId;
+            }
+            else if (path.Contains("/signing-profiles/", StringComparison.OrdinalIgnoreCase))
+            {
+                var sp = await _db.SigningProfiles.AsNoTracking().FirstOrDefaultAsync(p => p.Id == idGuid);
+                if (sp?.IssuerId != null)
+                {
+                    var resolvedCa = await _db.CertificateAuthorities
+                        .AsNoTracking()
+                        .IgnoreQueryFilters()
+                        .FirstOrDefaultAsync(ca => ca.CertificateId == sp.IssuerId);
+                    if (resolvedCa != null) return resolvedCa.Id;
+                }
+            }
+            else if (path.Contains("/requests/", StringComparison.OrdinalIgnoreCase))
+            {
+                // /admin/requests/{id}/approve etc.
+                var ca = await ResolveCaFromCsrIdAsync(idGuid);
+                if (ca != null) return ca;
+            }
+            else if (path.Contains("/enrollment-tokens/", StringComparison.OrdinalIgnoreCase))
+            {
+                var tok = await _db.EnrollmentTokens.AsNoTracking().FirstOrDefaultAsync(t => t.Id == idGuid);
+                if (tok?.CertificateAuthorityId != null) return tok.CertificateAuthorityId;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<Guid?> ResolveCaFromCertIdAsync(Guid certId)
+    {
+        var cert = await _db.Certificates.AsNoTracking().FirstOrDefaultAsync(c => c.CertificateId == certId);
+        if (cert?.SigningProfileId == null) return null;
+        return await ResolveCaFromSigningProfileAsync(cert.SigningProfileId.Value);
+    }
+
+    private async Task<Guid?> ResolveCaFromSerialAsync(string serial)
+    {
+        var cert = await _db.Certificates.AsNoTracking().FirstOrDefaultAsync(c => c.SerialNumber == serial);
+        if (cert?.SigningProfileId == null) return null;
+        return await ResolveCaFromSigningProfileAsync(cert.SigningProfileId.Value);
+    }
+
+    private async Task<Guid?> ResolveCaFromCsrIdAsync(Guid csrId)
+    {
+        var csr = await _db.CertificateRequests.AsNoTracking().FirstOrDefaultAsync(c => c.Id == csrId);
+        if (csr?.SigningProfileId == null) return null;
+        return await ResolveCaFromSigningProfileAsync(csr.SigningProfileId.Value);
+    }
+
+    private async Task<Guid?> ResolveCaFromSigningProfileAsync(Guid signingProfileId)
+    {
+        var sp = await _db.SigningProfiles.AsNoTracking().FirstOrDefaultAsync(s => s.Id == signingProfileId);
+        if (sp?.IssuerId == null) return null;
+        var ca = await _db.CertificateAuthorities
+            .AsNoTracking()
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.CertificateId == sp.IssuerId);
+        return ca?.Id;
+    }
+
+    private static bool TryGetGuid(IDictionary<string, object?> routeValues, string key, out Guid value)
+    {
+        value = Guid.Empty;
+        return routeValues.TryGetValue(key, out var obj)
+            && obj != null
+            && Guid.TryParse(obj.ToString(), out value);
+    }
+}

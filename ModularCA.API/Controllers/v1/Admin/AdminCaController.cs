@@ -1,0 +1,780 @@
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
+using ModularCA.API.Controllers.v1.Auth;
+using ModularCA.API.Filters;
+using ModularCA.Auth.Authorization;
+using ModularCA.Auth.Interfaces;
+using ModularCA.Core.Services;
+using ModularCA.Database;
+using Serilog;
+using ModularCA.Shared.Enums;
+using ModularCA.Shared.Interfaces;
+using ModularCA.Shared.Models;
+using ModularCA.Shared.Utils;
+using System.ComponentModel.DataAnnotations;
+
+namespace ModularCA.API.Controllers.v1.Admin
+{
+    /// <summary>
+    /// Admin endpoints for managing Certificate Authorities including creation, listing, and hierarchy management.
+    /// Class-level <c>[Authorize]</c> ensures no action falls through the
+    /// permissive branch where a forgotten attribute meant an anonymous caller could reach
+    /// a handler. Individual actions still override with stricter policies as needed.
+    /// </summary>
+    [ApiController]
+    [Route("api/v1/admin/authorities")]
+    [Authorize(Policy = "CaAuditor")]
+    public class AdminCaController(ICertificateStore certService, ICurrentUserService currentUser, ModularCADbContext db, IAuditService audit, CaCreationService caCreationService, IDistributedCache cache, ISecurityAlertService alertService, ICaGroupAuthorizationService groupAuth, IKeyCeremonyService ceremonySvc) : ControllerBase
+    {
+        private readonly ICertificateStore _certService = certService;
+        private readonly ICurrentUserService _currentUser = currentUser;
+        private readonly ModularCADbContext _db = db;
+        private readonly IAuditService _audit = audit;
+        private readonly CaCreationService _caCreation = caCreationService;
+        private readonly IDistributedCache _cache = cache;
+        private readonly ISecurityAlertService _alertService = alertService;
+        private readonly ICaGroupAuthorizationService _groupAuth = groupAuth;
+        private readonly IKeyCeremonyService _ceremonySvc = ceremonySvc;
+
+        [HttpGet]
+        [Authorize(Policy = "CaAuditor")]
+        public async Task<IActionResult> GetCertificateAuthorities()
+        {
+            var query = _db.CertificateAuthorities
+                .Include(ca => ca.Certificate)
+                .Where(ca => !ca.IsSshCa) // SSH CAs are managed separately via /admin/ssh
+                .AsNoTracking()
+                .AsQueryable();
+
+            // Filter CAs to only those belonging to the user's accessible tenants
+            var tenantIds = HttpContext.Items["AccessibleTenantIds"] as HashSet<Guid>;
+            if (tenantIds != null)
+                query = query.Where(ca => tenantIds.Contains(ca.TenantId));
+
+            var cas = await query.ToListAsync();
+
+            var result = cas.Select(ca => new
+            {
+                ca.Id,
+                ca.Name,
+                ca.Label,
+                ca.Type,
+                IsRoot = ca.Type == "Root",
+                ca.IsDefault,
+                ca.IsEnabled,
+                ca.ParentCaId,
+                CertificateSerial = ca.Certificate?.SerialNumber,
+                CertificateSubjectDN = ca.Certificate?.SubjectDN,
+                CertificateNotAfter = ca.Certificate?.NotAfter,
+            });
+
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Returns all CA certificates including system CAs, filtered by the current user's tenant access.
+        /// System admins see all CA certificates; other users see only those belonging to their accessible tenants.
+        /// </summary>
+        [HttpGet("include-system-ca")]
+        [Authorize(Policy = "CaAuditor")]
+        public async Task<IActionResult> GetAllCaCertificates()
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+
+            var certs = await _certService.GetAllCertificatesAsync();
+            var caCerts = certs.Where(c => c.IsCA).ToList();
+
+            // Apply tenant filtering for non-system-admins
+            var tenantIds = HttpContext.Items["AccessibleTenantIds"] as HashSet<Guid>;
+            if (tenantIds != null && HttpContext.Items["IsSystemAdmin"] is not true)
+            {
+                var accessibleCertIds = await _db.CertificateAuthorities
+                    .Where(ca => tenantIds.Contains(ca.TenantId) && ca.CertificateId != null)
+                    .Select(ca => ca.CertificateId!.Value)
+                    .ToListAsync();
+                var accessibleCertIdSet = new HashSet<Guid>(accessibleCertIds);
+                caCerts = caCerts.Where(c => accessibleCertIdSet.Contains(c.CertificateId)).ToList();
+            }
+
+            return Ok(caCerts);
+        }
+
+        /// <summary>
+        /// Returns system signing CA certificates. Requires CaAuditor policy.
+        /// </summary>
+        [HttpGet("system-ca")]
+        [Authorize(Policy = "CaAuditor")]
+        public async Task<IActionResult> GetSystemCaCertificates()
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+            var certs = await _certService.GetAllCertificatesAsync();
+            var caCerts = certs
+                .Where(c => c.IsCA && (c.SubjectDN?.Contains("System Signing CA") ?? false))
+                .ToList();
+            return Ok(caCerts);
+        }
+
+        /// <summary>
+        /// Retrieves CA certificate metadata by serial number. Enforces that
+        /// the caller has access to the owning CA's tenant before returning the record, and
+        /// collapses cross-tenant mismatches to 404 to avoid existence oracles.
+        /// </summary>
+        [HttpGet("{serial}")]
+        public async Task<ActionResult<CertificateInfoModel>> GetCertificateInfo(string serial)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+            var cert = await _certService.GetCertificateInfoAsync(serial);
+            if (cert == null)
+                return NotFound();
+            if (!await CallerCanSeeCaCertAsync(cert.CertificateId))
+                return NotFound();
+            return Ok(cert);
+        }
+
+        /// <summary>
+        /// Downloads a CA certificate file by serial. Applies the same
+        /// tenant gate as <see cref="GetCertificateInfo"/> and returns 404 on mismatch.
+        /// </summary>
+        [HttpGet("{serial}/file")]
+        public async Task<IActionResult> GetCertificateFile(string serial)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+            var cert = await _certService.GetCertificateInfoAsync(serial);
+            if (cert == null)
+                return NotFound();
+            if (!await CallerCanSeeCaCertAsync(cert.CertificateId))
+                return NotFound();
+
+            var acceptHeader = Request.Headers["Accept"].ToString();
+            if (acceptHeader.Contains("application/x-pem-file", StringComparison.OrdinalIgnoreCase) ||
+                acceptHeader.Contains("text/plain", StringComparison.OrdinalIgnoreCase))
+            {
+                var certName = cert.SubjectDN.Split(',')[0].Trim();
+                var fileName = certName.StartsWith("CN=", StringComparison.OrdinalIgnoreCase)
+                    ? certName.Substring(3).Trim()
+                    : certName;
+                var pemBytes = System.Text.Encoding.UTF8.GetBytes(cert.Pem);
+                return File(pemBytes, "application/x-pem-file", fileName);
+            }
+            else if (acceptHeader.Contains("application/x-x509-ca-cert", StringComparison.OrdinalIgnoreCase) ||
+                     acceptHeader.Contains("application/pkix-cert", StringComparison.OrdinalIgnoreCase) ||
+                     acceptHeader.Contains("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+            {
+                var certDer = CertificateUtil.ParseFromPem(cert.Pem);
+                var certName = cert.SubjectDN.Split(',')[0].Trim();
+                var fileName = certName.StartsWith("CN=", StringComparison.OrdinalIgnoreCase)
+                    ? certName.Substring(3).Trim()
+                    : certName;
+                return File(certDer.GetEncoded(), "application/x-x509-ca-cert", fileName);
+            }
+            else
+            {
+                var certName = cert.SubjectDN.Split(',')[0].Trim();
+                var fileName = certName.StartsWith("CN=", StringComparison.OrdinalIgnoreCase)
+                    ? certName.Substring(3).Trim()
+                    : certName;
+                var pemBytes = System.Text.Encoding.UTF8.GetBytes(cert.Pem);
+                return File(pemBytes, "application/x-pem-file", fileName);
+            }
+        }
+
+        /// <summary>
+        /// Returns the CA hierarchy tree with full certificate details, protocol configs, and service URLs.
+        /// System admins see all CAs; other users see only CAs belonging to their accessible tenants.
+        /// </summary>
+        [HttpGet("hierarchy")]
+        [Authorize(Policy = "CaAuditor")]
+        [ProducesResponseType(200)]
+        [ProducesResponseType(401)]
+        public async Task<IActionResult> GetHierarchy()
+        {
+            var caQuery = _db.CertificateAuthorities
+                .Include(ca => ca.Certificate)
+                .AsNoTracking()
+                .AsQueryable();
+
+            // Filter CAs to only those belonging to the user's accessible tenants
+            var tenantIds = HttpContext.Items["AccessibleTenantIds"] as HashSet<Guid>;
+            if (tenantIds != null)
+                caQuery = caQuery.Where(ca => tenantIds.Contains(ca.TenantId));
+
+            var cas = await caQuery.ToListAsync();
+            var caIds = cas.Select(ca => ca.Id).ToHashSet();
+
+            var protocolConfigs = await _db.CaProtocolConfigs
+                .Include(pc => pc.SigningProfile)
+                .Include(pc => pc.CertProfile)
+                .Where(pc => caIds.Contains(pc.CaId))
+                .AsNoTracking()
+                .ToListAsync();
+
+            var caCertIds = cas.Where(ca => ca.CertificateId != null).Select(ca => ca.CertificateId!.Value).ToHashSet();
+            var serviceUrls = await _db.CaServiceUrls
+                .Where(su => caCertIds.Contains(su.CaCertificateId))
+                .AsNoTracking()
+                .ToListAsync();
+
+            object MapCa(Shared.Entities.CertificateAuthorityEntity ca)
+            {
+                var caProtocols = protocolConfigs
+                    .Where(pc => pc.CaId == ca.Id)
+                    .Select(pc => new
+                    {
+                        pc.Protocol,
+                        Enabled = pc.IsEnabled,
+                        SigningProfileId = pc.SigningProfileId,
+                        SigningProfileName = pc.SigningProfile?.Name,
+                        CertProfileId = pc.CertProfileId,
+                        CertProfileName = pc.CertProfile?.Name,
+                    })
+                    .ToList();
+
+                var urls = serviceUrls.FirstOrDefault(su => su.CaCertificateId == ca.CertificateId);
+
+                return new
+                {
+                    ca.Id,
+                    ca.Name,
+                    ca.Label,
+                    ca.Type,
+                    IsRoot = ca.Type == "Root",
+                    ca.IsDefault,
+                    ca.IsEnabled,
+                    ca.ParentCaId,
+                    ca.OcspResponderCertificateId,
+                    ca.CertificateId,
+                    Certificate = ca.Certificate != null ? new
+                    {
+                        ca.Certificate.SerialNumber,
+                        ca.Certificate.SubjectDN,
+                        ca.Certificate.Issuer,
+                        ca.Certificate.NotBefore,
+                        ca.Certificate.NotAfter,
+                        ca.Certificate.Thumbprints,
+                        ca.Certificate.IsCA,
+                        ca.Certificate.Revoked,
+                        ca.Certificate.RevocationReason,
+                        ca.Certificate.KeyUsagesJson,
+                        ca.Certificate.ExtendedKeyUsagesJson,
+                        ca.Certificate.Pem,
+                    } : null,
+                    ProtocolConfigs = caProtocols,
+                    ServiceUrls = urls != null ? new
+                    {
+                        urls.PublicBaseUrl,
+                    } : null,
+                    // Recursively nest children
+                    Children = cas.Where(c => c.ParentCaId == ca.Id).Select(c => MapCa(c)).ToList()
+                };
+            }
+
+            // Only return root CAs at the top level; children are nested
+            var roots = cas.Where(ca => ca.ParentCaId == null);
+            var result = roots.Select(ca => MapCa(ca));
+
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Update CA properties. Runtime fields (Name, Label, IsDefault, IsEnabled) take effect immediately.
+        /// Requires step-up MFA verification.
+        /// </summary>
+        [HttpPut("{id:guid}")]
+        [Authorize(Policy = "SystemOperator")]
+        [RequireStepUp(StepUpOps.UpdateCa, "id")]
+        public async Task<IActionResult> UpdateCa(Guid id, [FromBody] UpdateCaRequest request)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+
+            var ca = await _db.CertificateAuthorities.FindAsync(id);
+            if (ca == null)
+                return NotFound(new { error = $"CA with ID {id} not found" });
+
+            var changes = new List<string>();
+
+            if (request.Name != null && request.Name != ca.Name)
+            {
+                ca.Name = request.Name;
+                changes.Add("Name");
+            }
+            if (request.Label != null && request.Label != ca.Label)
+            {
+                ca.Label = request.Label;
+                changes.Add("Label");
+            }
+            if (request.IsDefault.HasValue && request.IsDefault.Value != ca.IsDefault)
+            {
+                if (request.IsDefault.Value)
+                {
+                    // Clear other defaults
+                    var others = await _db.CertificateAuthorities
+                        .Where(c => c.IsDefault && c.Id != id)
+                        .ToListAsync();
+                    foreach (var other in others) other.IsDefault = false;
+                }
+                ca.IsDefault = request.IsDefault.Value;
+                changes.Add("IsDefault");
+            }
+            if (request.IsEnabled.HasValue && request.IsEnabled.Value != ca.IsEnabled)
+            {
+                ca.IsEnabled = request.IsEnabled.Value;
+                changes.Add("IsEnabled");
+            }
+
+            await _db.SaveChangesAsync();
+
+            if (changes.Count > 0)
+            {
+                await _currentUser.EnsureLoadedAsync();
+                await _audit.LogAsync(AuditActionType.CaUpdated, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "CertificateAuthority", id.ToString(), new { Changes = changes, ca.Name, ca.Label },
+                    HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    certificateAuthorityId: ca.Id, tenantId: ca.TenantId);
+            }
+
+            return Ok(new
+            {
+                message = changes.Count > 0 ? $"CA updated: {string.Join(", ", changes)}" : "No changes",
+                changes,
+                reissueRequired = false,
+            });
+        }
+
+        /// <summary>
+        /// Create an intermediate CA signed by a parent CA. Requires step-up MFA verification.
+        /// </summary>
+        [HttpPost("create-intermediate")]
+        [Authorize(Policy = "SystemOperator")]
+        [RequireStepUp(StepUpOps.CreateCa)]
+        public async Task<IActionResult> CreateIntermediate([FromBody] CreateIntermediateCaRequest request)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+
+            var parentCa = await _db.CertificateAuthorities
+                .Include(ca => ca.Certificate)
+                .FirstOrDefaultAsync(ca => ca.Id == request.ParentCaId && ca.IsEnabled);
+
+            if (parentCa == null)
+                return BadRequest(new { error = "Parent CA not found or disabled" });
+
+            if (parentCa.Certificate == null)
+                return BadRequest(new { error = "Parent CA has no certificate" });
+
+            // The System Signing CA signs keystore entries only — never sub-CAs or
+            // end-entity certs. Refuse to let it parent a new CA.
+            if (string.Equals(parentCa.Label, "system-signing-ca", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { error = "The system signing CA cannot parent sub-CAs. Select a non-system CA as the parent." });
+
+            // Enforce central key-algorithm policy before touching the service layer
+            if (!KeyAlgorithmPolicy.IsAllowed(request.KeyAlgorithm, request.KeySize))
+                return BadRequest(new { error = $"Key algorithm '{request.KeyAlgorithm}' with size/curve '{request.KeySize}' is not permitted. Allowed: RSA 2048/3072/4096/7680/8192, ECDSA P-256/P-384/P-521, Ed25519, Ed448, ML-DSA-44/65/87, SLH-DSA-*." });
+
+            // Check ceremony-first enforcement for this tenant
+            var tenant = await _db.Tenants.FindAsync(request.TenantId);
+            if (tenant?.RequireKeyCeremony == true)
+            {
+                var parameters = new ModularCA.Shared.Models.KeyCeremonyParameters
+                {
+                    SubjectCN = request.SubjectCN,
+                    SubjectO = request.SubjectO,
+                    SubjectOU = request.SubjectOU,
+                    SubjectL = request.SubjectL,
+                    SubjectST = request.SubjectST,
+                    SubjectC = request.SubjectC,
+                    KeyAlgorithm = request.KeyAlgorithm,
+                    KeySize = request.KeySize,
+                    ValidityYears = request.ValidityYears,
+                    TenantId = request.TenantId,
+                    ParentCaId = request.ParentCaId,
+                    Label = request.Label,
+                    PublicBaseUrl = request.PublicBaseUrl,
+                    CertProfileId = request.CertProfileId,
+                    NameConstraintsPermitted = request.NameConstraintsPermitted,
+                    NameConstraintsExcluded = request.NameConstraintsExcluded,
+                };
+                var ceremony = await _ceremonySvc.InitiateAsync(
+                    "CreateIntermediateCA",
+                    $"Create intermediate CA '{request.SubjectCN}' under {parentCa.Name}",
+                    string.Empty,
+                    _currentUser.User.Id,
+                    _currentUser.User.Username ?? string.Empty,
+                    System.Text.Json.JsonSerializer.Serialize(parameters));
+                return Ok(new
+                {
+                    requiresCeremony = true,
+                    ceremonyId = ceremony.Id,
+                    ceremony.Status,
+                    ceremony.RequiredApprovals,
+                    message = $"Key ceremony required for tenant '{tenant.Name}'. A ceremony has been created and requires {ceremony.RequiredApprovals} approval(s)."
+                });
+            }
+
+            try
+            {
+                var newCa = await _caCreation.CreateIntermediateAsync(
+                    parentCa, parentCa.Certificate,
+                    request.SubjectCN, request.SubjectO, request.SubjectOU,
+                    request.SubjectL, request.SubjectST, request.SubjectC,
+                    request.KeyAlgorithm, request.KeySize, request.ValidityYears,
+                    request.Label, request.TenantId,
+                    publicBaseUrl: request.PublicBaseUrl,
+                    certProfileId: request.CertProfileId,
+                    nameConstraintsPermittedJson: request.NameConstraintsPermitted is { Count: > 0 } perm
+                        ? System.Text.Json.JsonSerializer.Serialize(perm)
+                        : null,
+                    nameConstraintsExcludedJson: request.NameConstraintsExcluded is { Count: > 0 } excl
+                        ? System.Text.Json.JsonSerializer.Serialize(excl)
+                        : null);
+
+                await _currentUser.EnsureLoadedAsync();
+                await _audit.LogAsync(AuditActionType.CaCreated, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "CertificateAuthority", newCa.Id.ToString(),
+                    new { newCa.Name, newCa.Label, newCa.Type, request.KeyAlgorithm, request.KeySize },
+                    HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    certificateAuthorityId: newCa.Id, tenantId: request.TenantId);
+
+                return Ok(new
+                {
+                    newCa.Id,
+                    newCa.Name,
+                    newCa.Label,
+                    newCa.Type,
+                    newCa.CertificateId,
+                    newCa.ParentCaId,
+                    message = $"Intermediate CA '{request.SubjectCN}' created successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to create intermediate CA");
+
+                // Every CA creation attempt — including
+                // failures — must produce an audit trail. Wrapped so the audit emission
+                // cannot mask the original error response.
+                try
+                {
+                    await _currentUser.EnsureLoadedAsync();
+                    await _audit.LogAsync(AuditActionType.CaCreated, _currentUser.User?.Id, _currentUser.User?.Username,
+                        "CertificateAuthority", request.ParentCaId.ToString(),
+                        new
+                        {
+                            Type = "Intermediate",
+                            request.SubjectCN,
+                            request.Label,
+                            request.KeyAlgorithm,
+                            request.KeySize,
+                            request.ParentCaId,
+                            request.TenantId,
+                        },
+                        HttpContext.Connection.RemoteIpAddress?.ToString(),
+                        success: false,
+                        errorMessage: ex.Message,
+                        tenantId: request.TenantId);
+                }
+                catch (Exception auditEx)
+                {
+                    Log.Warning(auditEx, "Audit emission for failed intermediate CA creation failed");
+                }
+
+                return StatusCode(500, new { error = "An unexpected error occurred while creating the intermediate CA. Please try again." });
+            }
+        }
+
+        /// <summary>
+        /// Shared tenant gate for CA certificate lookups. Returns true
+        /// when the caller is a system admin (all tenants), or when the owning CA's tenant
+        /// is in the caller's <c>AccessibleTenantIds</c>. Also returns true when the cert is
+        /// not attached to any CA record (legacy / standalone trust anchor).
+        /// </summary>
+        private async Task<bool> CallerCanSeeCaCertAsync(Guid certificateId)
+        {
+            if (HttpContext.Items["IsSystemAdmin"] is true)
+                return true;
+
+            var tenantIds = HttpContext.Items["AccessibleTenantIds"] as HashSet<Guid>;
+            if (tenantIds == null)
+                return false;
+
+            // If the certificate is not bound to any CertificateAuthorities row, fall back
+            // to denying — admin callers should never reach here through an unbound cert.
+            var caTenant = await _db.CertificateAuthorities
+                .AsNoTracking()
+                .Where(c => c.CertificateId == certificateId)
+                .Select(c => (Guid?)c.TenantId)
+                .FirstOrDefaultAsync();
+            return caTenant.HasValue && tenantIds.Contains(caTenant.Value);
+        }
+
+        /// <summary>
+        /// Create a new self-signed root CA. Requires step-up MFA verification.
+        /// </summary>
+        [HttpPost("create-root")]
+        [Authorize(Policy = "SystemAdmin")]
+        [RequireStepUp(StepUpOps.CreateCa)]
+        public async Task<IActionResult> CreateRoot([FromBody] CreateRootCaRequest request)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+
+            if (string.IsNullOrWhiteSpace(request.SubjectCN))
+                return BadRequest(new { error = "Common Name is required" });
+
+            // Enforce central key-algorithm policy before touching the service layer
+            if (!KeyAlgorithmPolicy.IsAllowed(request.KeyAlgorithm, request.KeySize))
+                return BadRequest(new { error = $"Key algorithm '{request.KeyAlgorithm}' with size/curve '{request.KeySize}' is not permitted. Allowed: RSA 2048/3072/4096/7680/8192, ECDSA P-256/P-384/P-521, Ed25519, Ed448, ML-DSA-44/65/87, SLH-DSA-*." });
+
+            // Check ceremony-first enforcement for this tenant
+            var rootTenant = await _db.Tenants.FindAsync(request.TenantId);
+            if (rootTenant?.RequireKeyCeremony == true)
+            {
+                var parameters = new ModularCA.Shared.Models.KeyCeremonyParameters
+                {
+                    SubjectCN = request.SubjectCN,
+                    SubjectO = request.SubjectO,
+                    SubjectOU = request.SubjectOU,
+                    SubjectL = request.SubjectL,
+                    SubjectST = request.SubjectST,
+                    SubjectC = request.SubjectC,
+                    KeyAlgorithm = request.KeyAlgorithm,
+                    KeySize = request.KeySize,
+                    ValidityYears = request.ValidityYears,
+                    TenantId = request.TenantId,
+                    Label = request.Label,
+                    PublicBaseUrl = request.PublicBaseUrl,
+                    NameConstraintsPermitted = request.NameConstraintsPermitted,
+                    NameConstraintsExcluded = request.NameConstraintsExcluded,
+                };
+                var ceremony = await _ceremonySvc.InitiateAsync(
+                    "CreateRootCA",
+                    $"Create root CA '{request.SubjectCN}'",
+                    string.Empty,
+                    _currentUser.User.Id,
+                    _currentUser.User.Username ?? string.Empty,
+                    System.Text.Json.JsonSerializer.Serialize(parameters));
+                return Ok(new
+                {
+                    requiresCeremony = true,
+                    ceremonyId = ceremony.Id,
+                    ceremony.Status,
+                    ceremony.RequiredApprovals,
+                    message = $"Key ceremony required for tenant '{rootTenant.Name}'. A ceremony has been created and requires {ceremony.RequiredApprovals} approval(s)."
+                });
+            }
+
+            try
+            {
+                var newCa = await _caCreation.CreateRootAsync(
+                    request.SubjectCN, request.SubjectO, request.SubjectOU,
+                    request.SubjectL, request.SubjectST, request.SubjectC,
+                    request.KeyAlgorithm, request.KeySize, request.ValidityYears,
+                    request.Label, request.TenantId,
+                    publicBaseUrl: request.PublicBaseUrl,
+                    nameConstraintsPermittedJson: request.NameConstraintsPermitted is { Count: > 0 } perm
+                        ? System.Text.Json.JsonSerializer.Serialize(perm)
+                        : null,
+                    nameConstraintsExcludedJson: request.NameConstraintsExcluded is { Count: > 0 } excl
+                        ? System.Text.Json.JsonSerializer.Serialize(excl)
+                        : null);
+
+                await _currentUser.EnsureLoadedAsync();
+                await _audit.LogAsync(AuditActionType.CaCreated, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "CertificateAuthority", newCa.Id.ToString(),
+                    new { newCa.Name, newCa.Label, Type = "Root", request.KeyAlgorithm, request.KeySize },
+                    HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    certificateAuthorityId: newCa.Id, tenantId: request.TenantId);
+
+                _ = _alertService.RaiseAlertAsync("RootCaCreated", AlertSeverity.Warning, $"Root CA '{request.SubjectCN}' created by {_currentUser.User?.Username}", new { CaId = newCa.Id, newCa.Name, request.KeyAlgorithm, request.KeySize });
+                return Ok(new
+                {
+                    newCa.Id,
+                    newCa.Name,
+                    newCa.Label,
+                    newCa.Type,
+                    newCa.CertificateId,
+                    message = $"Root CA '{request.SubjectCN}' created successfully"
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to create root CA");
+
+                // Mirror the success-path CaCreated audit
+                // with success=false on the failure branch so SIEM has a single action
+                // type to filter on for "CA creation attempt." Wrapped so audit failure
+                // cannot mask the user-facing 500.
+                try
+                {
+                    await _currentUser.EnsureLoadedAsync();
+                    await _audit.LogAsync(AuditActionType.CaCreated, _currentUser.User?.Id, _currentUser.User?.Username,
+                        "CertificateAuthority", request.SubjectCN,
+                        new
+                        {
+                            Type = "Root",
+                            request.SubjectCN,
+                            request.Label,
+                            request.KeyAlgorithm,
+                            request.KeySize,
+                            request.TenantId,
+                        },
+                        HttpContext.Connection.RemoteIpAddress?.ToString(),
+                        success: false,
+                        errorMessage: ex.Message,
+                        tenantId: request.TenantId);
+                }
+                catch (Exception auditEx)
+                {
+                    Log.Warning(auditEx, "Audit emission for failed root CA creation failed");
+                }
+
+                return StatusCode(500, new { error = "An unexpected error occurred while creating the root CA. Please try again." });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Request body for updating an existing Certificate Authority's runtime properties.
+    /// </summary>
+    public class UpdateCaRequest
+    {
+        [MaxLength(255)]
+        public string? Name { get; set; }
+
+        [MaxLength(255)]
+        public string? Label { get; set; }
+
+        public bool? IsDefault { get; set; }
+        public bool? IsEnabled { get; set; }
+    }
+
+    /// <summary>
+    /// Request body for creating an intermediate Certificate Authority under an existing parent CA.
+    /// </summary>
+    public class CreateIntermediateCaRequest
+    {
+        [Required, MaxLength(256)]
+        public string SubjectCN { get; set; } = string.Empty;
+
+        [MaxLength(256)]
+        public string SubjectO { get; set; } = string.Empty;
+
+        [MaxLength(256)]
+        public string? SubjectOU { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectL { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectST { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectC { get; set; }
+
+        public Guid ParentCaId { get; set; }
+        /// <summary>Tenant that owns this CA.</summary>
+        public Guid TenantId { get; set; }
+
+        [Required, MaxLength(50)]
+        public string KeyAlgorithm { get; set; } = "ECDSA";
+
+        public int KeySize { get; set; } = 384;
+        public int ValidityYears { get; set; } = 10;
+
+        [MaxLength(255)]
+        public string? Label { get; set; }
+        /// <summary>Optional CA certificate profile ID. Defaults to "Main CA Certificate Profile" when not specified.</summary>
+        public Guid? CertProfileId { get; set; }
+        /// <summary>
+        /// Public base URL for this CA (e.g. <c>http://path2.ca.example.com</c>). CDP, OCSP, and
+        /// AIA endpoints are auto-generated from this base URL at cert-build time. Leave null to
+        /// issue certs without CDP/AIA extensions until a base URL is set later.
+        /// </summary>
+        [MaxLength(2048)]
+        public string? PublicBaseUrl { get; set; }
+
+        /// <summary>
+        /// Optional list of permitted name subtrees (NameConstraints, RFC 5280 §4.2.1.10) baked
+        /// into the CA cert and copied onto the per-CA signing profile. Format matches the
+        /// signing-profile column: a JSON array of <c>"DNS:.example.com"</c>, <c>"IP:10.0.0.0/8"</c>,
+        /// <c>"Email:@example.com"</c>, <c>"URI:https://example.com"</c>, or <c>"DN:CN=...,O=..."</c> entries.
+        /// Leave null to omit the extension entirely.
+        /// </summary>
+        public List<string>? NameConstraintsPermitted { get; set; }
+
+        /// <summary>
+        /// Optional list of excluded name subtrees, same format as <see cref="NameConstraintsPermitted"/>.
+        /// </summary>
+        public List<string>? NameConstraintsExcluded { get; set; }
+    }
+
+    /// <summary>
+    /// Request body for creating a new self-signed root Certificate Authority.
+    /// </summary>
+    public class CreateRootCaRequest
+    {
+        [Required, MaxLength(256)]
+        public string SubjectCN { get; set; } = string.Empty;
+
+        [MaxLength(256)]
+        public string? SubjectO { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectOU { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectL { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectST { get; set; }
+
+        [MaxLength(256)]
+        public string? SubjectC { get; set; }
+
+        /// <summary>Tenant that owns this CA.</summary>
+        public Guid TenantId { get; set; }
+
+        [Required, MaxLength(50)]
+        public string KeyAlgorithm { get; set; } = "ECDSA";
+
+        public int KeySize { get; set; } = 384;
+        public int ValidityYears { get; set; } = 25;
+
+        [MaxLength(255)]
+        public string? Label { get; set; }
+        /// <summary>Optional CA certificate profile ID. Defaults to "Main CA Certificate Profile" when not specified.</summary>
+        public Guid? CertProfileId { get; set; }
+        /// <summary>
+        /// Public base URL for this CA (e.g. <c>http://path2.ca.example.com</c>). CDP, OCSP, and
+        /// AIA endpoints are auto-generated from this base URL at cert-build time. Leave null to
+        /// issue certs without CDP/AIA extensions until a base URL is set later.
+        /// </summary>
+        [MaxLength(2048)]
+        public string? PublicBaseUrl { get; set; }
+
+        /// <summary>
+        /// Optional list of permitted name subtrees (NameConstraints, RFC 5280 §4.2.1.10) baked
+        /// into the CA cert and copied onto the per-CA signing profile. Format matches the
+        /// signing-profile column: a JSON array of <c>"DNS:.example.com"</c>, <c>"IP:10.0.0.0/8"</c>,
+        /// <c>"Email:@example.com"</c>, <c>"URI:https://example.com"</c>, or <c>"DN:CN=...,O=..."</c> entries.
+        /// Leave null to omit the extension entirely. Most root CAs leave this empty and apply
+        /// constraints only on their immediate intermediates.
+        /// </summary>
+        public List<string>? NameConstraintsPermitted { get; set; }
+
+        /// <summary>
+        /// Optional list of excluded name subtrees, same format as <see cref="NameConstraintsPermitted"/>.
+        /// </summary>
+        public List<string>? NameConstraintsExcluded { get; set; }
+    }
+}
