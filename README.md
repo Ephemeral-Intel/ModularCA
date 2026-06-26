@@ -64,6 +64,44 @@ dotnet build ModularCA.API/ModularCA.API.csproj -c Development   # or Staging / 
 dotnet run --project ModularCA.API -c Development   # or Staging / Production
 ```
 
+##### Operational commands (run a task, then exit)
+
+| Flag | Arguments | Description |
+|------|-----------|-------------|
+| `--bootstrap` | — | Provisions a fresh install: database, tenants, groups, roles, profiles/OIDs, the system + default CA certs, and the double-signed keystore. The CLI equivalent of the web setup wizard. |
+| `--reset --force` | — | **Destructive.** Factory reset — drops databases, keystores, and config so the install can be bootstrapped again. `--force` is mandatory. The audit database is *not* dropped (retained by design), and `config/backup.key` is renamed to `backup.key.pre-reset-<ts>`. |
+| `--confirm-db-name <name>` | DB name | Required with `--reset --force` — the operator must type the target database name to prove they know what is being destroyed. |
+| `--expected-db <name>` | DB name | Backwards-compatible alias for `--confirm-db-name`. |
+| `--ci-no-confirm` | — | Waives the `--confirm-db-name` gate for unattended CI pipelines that genuinely need an automated reset. |
+| `--backup [<path>]` | output path (optional) | Writes an encrypted backup archive. Defaults to a built-in location if no path is given. |
+| `--restore <archive>` | archive path | Restores from an encrypted backup archive. |
+| `--password <pwd>` | password | Used with `--restore` for `StoredPassword`-mode archives when the local password key file is missing or doesn't match. If omitted when required, the archive password is prompted for interactively. |
+
+##### Runtime flags (modify a normal launch)
+
+| Flag | Arguments | Description |
+|------|-----------|-------------|
+| `--setup-local` | — | Allows the setup wizard to accept connections from RFC 1918 private networks. |
+| `--setup-bind <address>` | IP address | Binds the setup wizard listener to a specific address. Defaults to `0.0.0.0`; an invalid value falls back to `0.0.0.0` with a warning. A loud warning is emitted if the bind lands on a non-RFC1918 interface. |
+| `--allow-dev-mode` | — | Required to start when `ASPNETCORE_ENVIRONMENT=Development`, since the developer exception page can leak stack traces, file paths, and SQL. Equivalent to setting `MODULARCA_ALLOW_DEV_MODE=1`. |
+
+##### Examples
+
+```bash
+# Provision a fresh install
+dotnet run --project ModularCA.API -- --bootstrap
+
+# Factory reset (destroys all data; audit DB is retained)
+dotnet run --project ModularCA.API -- --reset --force --confirm-db-name modularca
+
+# Unattended reset in CI
+dotnet run --project ModularCA.API -- --reset --force --ci-no-confirm
+
+# Back up and restore
+dotnet run --project ModularCA.API -- --backup ./backups/modularca.enc
+dotnet run --project ModularCA.API -- --restore ./backups/modularca.enc
+```
+
 #### Installation Notes
 Development builds are created at an arbitrary rate, determined by the changes made. Once a development build is created, it is published as a release. No release of ModularCA will be considered production-ready until the frontend functionality is complete.
 
