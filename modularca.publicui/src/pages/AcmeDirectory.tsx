@@ -37,12 +37,17 @@ const AcmeDirectory: React.FC = () => {
 
         apiGet<any[]>('/api/v1/public/ca')
             .then((data) => {
-                const caList = (data || []).map((ca: any) => ({
-                    id: ca.id,
-                    name: ca.name || ca.subjectDN,
-                    label: ca.label || 'default',
-                    isDefault: ca.isDefault,
-                }));
+                // Only CAs that actually expose ACME. The API's per-CA `protocols`
+                // list is already gated by per-CA config + the system ACME flag, so a
+                // CA appears here only when ACME is genuinely usable against it.
+                const caList = (data || [])
+                    .filter((ca: any) => (ca.protocols || []).some((p: any) => p.protocol === 'ACME'))
+                    .map((ca: any) => ({
+                        id: ca.id,
+                        name: ca.name || ca.subjectDN,
+                        label: ca.label || 'default',
+                        isDefault: ca.isDefault,
+                    }));
                 setCas(caList);
                 const defaultCa = caList.find(c => c.isDefault) || caList[0];
                 if (defaultCa) setSelectedLabel(defaultCa.label);
@@ -72,6 +77,15 @@ const AcmeDirectory: React.FC = () => {
                     Use the ACME protocol to automatically obtain and renew TLS certificates.
                 </p>
             </div>
+
+            {/* No ACME-enabled CA */}
+            {!loading && !error && cas.length === 0 && (
+                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-5">
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                        ACME is not enabled for any certificate authority on this deployment.
+                    </p>
+                </div>
+            )}
 
             {/* CA Selector */}
             {cas.length > 1 && (

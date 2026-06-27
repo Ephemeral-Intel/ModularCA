@@ -687,6 +687,7 @@ builder.Services.AddSingleton<IPqcKeyGenerationService, PqcKeyGenerationService>
 builder.Services.AddScoped<ICertPolicyService, CertPolicyService>();
 builder.Services.AddScoped<IQuotaService, QuotaService>();
 builder.Services.AddScoped<ITenantPolicyChangeService, TenantPolicyChangeService>();
+builder.Services.AddScoped<ModularCA.Auth.Authorization.IControlledUserCeremonyService, ModularCA.Auth.Authorization.ControlledUserCeremonyService>();
 builder.Services.AddScoped<ICertificateIssuanceService, CertificateIssuanceService>();
 builder.Services.AddScoped<ICertificateAccessService, CertificateAccessService>();
 builder.Services.AddScoped<ICertificateAccessEvaluator, CertificateAccessEvaluator>();
@@ -2073,6 +2074,13 @@ app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthC
     }
 }).AllowAnonymous();
 
+// Capture process start for the uptime field. Process.StartTime is the true OS
+// process start regardless of when it's read; fall back to now if the platform
+// denies the lookup so the readiness endpoint never throws over a stat.
+DateTime appStartUtc;
+try { appStartUtc = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime(); }
+catch { appStartUtc = DateTime.UtcNow; }
+
 app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
     AllowCachingResponses = false,
@@ -2106,6 +2114,7 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
             status = statusStr,
             checks,
             totalDurationMs = report.TotalDuration.TotalMilliseconds,
+            uptimeSeconds = (DateTime.UtcNow - appStartUtc).TotalSeconds,
             timestamp = DateTime.UtcNow.ToString("o")
         };
         await context.Response.WriteAsJsonAsync(result);

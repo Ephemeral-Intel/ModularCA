@@ -10,10 +10,10 @@ interface ToastProps {
 }
 
 const typeStyles: Record<ToastType, string> = {
-    success: 'bg-green-50 dark:bg-green-900/30 border-green-500 text-green-800 dark:text-green-300',
-    error: 'bg-red-50 dark:bg-red-900/30 border-red-500 text-red-800 dark:text-red-300',
-    warning: 'bg-amber-50 dark:bg-amber-900/30 border-amber-500 text-amber-800 dark:text-amber-300',
-    info: 'bg-blue-50 dark:bg-blue-900/30 border-blue-500 text-blue-800 dark:text-blue-300',
+    success: 'bg-green-50 dark:bg-green-900 border-green-500 text-green-800 dark:text-green-300',
+    error: 'bg-red-50 dark:bg-red-900 border-red-500 text-red-800 dark:text-red-300',
+    warning: 'bg-amber-50 dark:bg-amber-900 border-amber-500 text-amber-800 dark:text-amber-300',
+    info: 'bg-blue-50 dark:bg-blue-900 border-blue-500 text-blue-800 dark:text-blue-300',
 };
 
 const typeIcons: Record<ToastType, string> = {

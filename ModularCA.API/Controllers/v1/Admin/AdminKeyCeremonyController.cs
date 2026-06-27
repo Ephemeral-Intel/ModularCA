@@ -40,6 +40,7 @@ public class AdminKeyCeremonyController : ControllerBase
     private readonly ISshCaService _sshCaService;
     private readonly ICertificateRevocationService _revocationSvc;
     private readonly ITenantPolicyChangeService _tenantPolicyChangeSvc;
+    private readonly ModularCA.Auth.Authorization.IControlledUserCeremonyService _controlledUserSvc;
 
     /// <summary>
     /// Initializes a new instance of <see cref="AdminKeyCeremonyController"/>.
@@ -55,7 +56,8 @@ public class AdminKeyCeremonyController : ControllerBase
         ICaGroupAuthorizationService groupAuth,
         ISshCaService sshCaService,
         ICertificateRevocationService revocationSvc,
-        ITenantPolicyChangeService tenantPolicyChangeSvc)
+        ITenantPolicyChangeService tenantPolicyChangeSvc,
+        ModularCA.Auth.Authorization.IControlledUserCeremonyService controlledUserSvc)
     {
         _ceremonySvc = ceremonySvc;
         _currentUser = currentUser;
@@ -68,6 +70,7 @@ public class AdminKeyCeremonyController : ControllerBase
         _sshCaService = sshCaService;
         _revocationSvc = revocationSvc;
         _tenantPolicyChangeSvc = tenantPolicyChangeSvc;
+        _controlledUserSvc = controlledUserSvc;
     }
 
     /// <summary>
@@ -165,6 +168,16 @@ public class AdminKeyCeremonyController : ControllerBase
             ceremonies = await _ceremonySvc.ListByTenantsAsync(tenantIds, status);
         }
 
+        // Per-row "can the current user approve this?" — single-sources the eligibility rule
+        // (pending, not the initiator, has ceremony access, and for ControlledUserChange holds a
+        // dominating tier) so the UI doesn't re-implement it. Only computed for pending rows.
+        var viewerId = _currentUser.User.Id;
+        var canApproveMap = new Dictionary<Guid, bool>();
+        foreach (var c in ceremonies)
+        {
+            canApproveMap[c.Id] = await ComputeCanApproveAsync(c, viewerId);
+        }
+
         var result = ceremonies.Select(c => new
         {
             c.Id,
@@ -179,7 +192,9 @@ public class AdminKeyCeremonyController : ControllerBase
             c.Status,
             c.CreatedAt,
             c.ExpiresAt,
-            c.ExecutedAt
+            c.ExecutedAt,
+            c.ApprovalsJson,
+            CanApprove = canApproveMap[c.Id]
         });
 
         return Ok(result);
@@ -218,8 +233,24 @@ public class AdminKeyCeremonyController : ControllerBase
             ceremony.ExpiresAt,
             ceremony.ExecutedAt,
             ceremony.ParametersJson,
-            ceremony.ApprovalsJson
+            ceremony.ApprovalsJson,
+            CanApprove = await ComputeCanApproveAsync(ceremony, _currentUser.User.Id)
         });
+    }
+
+    /// <summary>
+    /// Whether <paramref name="viewerId"/> may approve <paramref name="ceremony"/> right now:
+    /// pending, not the initiator, has ceremony access, and — for ControlledUserChange — holds a
+    /// tier that dominates the affected privilege. Single source of approver eligibility for the UI.
+    /// </summary>
+    private async Task<bool> ComputeCanApproveAsync(ModularCA.Shared.Entities.KeyCeremonyEntity ceremony, Guid viewerId)
+    {
+        if (ceremony.Status != "Pending") return false;
+        if (ceremony.InitiatedByUserId == viewerId) return false;
+        if (!await CanAccessCeremonyAsync(ceremony)) return false;
+        if (ceremony.OperationType == "ControlledUserChange")
+            return await _controlledUserSvc.CanApproveAsync(viewerId, ceremony);
+        return true;
     }
 
     /// <summary>
@@ -239,6 +270,13 @@ public class AdminKeyCeremonyController : ControllerBase
         if (approveCeremony == null) return NotFound(new { error = "Ceremony not found." });
         if (!await CanAccessCeremonyAsync(approveCeremony))
             return StatusCode(403, new { error = "You do not have access to this ceremony." });
+
+        // Controlled-user ceremonies require tier-dominance: the approver must hold a tier that
+        // dominates the affected privilege (and may not be the change's target user). Initiator
+        // self-approval is blocked separately by the ceremony service.
+        if (approveCeremony.OperationType == "ControlledUserChange"
+            && !await _controlledUserSvc.CanApproveAsync(_currentUser.User.Id, approveCeremony))
+            return StatusCode(403, new { error = "You are not eligible to approve this controlled-user change — your role doesn't cover the affected privilege tier." });
 
         if (!await MfaStepUpController.ValidateStepUpTokenAsync(
                 _cache, User, mfaToken, StepUpOps.ApproveCeremony, id.ToString()))
@@ -600,6 +638,38 @@ public class AdminKeyCeremonyController : ControllerBase
                     ceremony.Id,
                     Status = "Executed",
                     message = "Tenant policy change applied.",
+                    result,
+                });
+            }
+            else if (ceremony.OperationType == "ControlledUserChange")
+            {
+                // Apply the ceremony-gated controlled-user privilege change (promote/demote/delete)
+                // via the dedicated service, then mark executed + emit a distinct audit entry.
+                var result = await _controlledUserSvc.ApplyApprovedAsync(ceremony.Id);
+
+                await _ceremonySvc.MarkExecutedAsync(id);
+
+                await _audit.LogAsync(
+                    AuditActionType.ControlledUserChangeApplied,
+                    _currentUser.User.Id,
+                    _currentUser.User.Username,
+                    "User",
+                    result.TargetUserId.ToString(),
+                    new
+                    {
+                        CeremonyId = ceremony.Id,
+                        result.ChangeType,
+                        result.TargetUserId,
+                        result.Capability,
+                        result.TenantId,
+                        result.CertificateAuthorityId,
+                    });
+
+                return Ok(new
+                {
+                    ceremony.Id,
+                    Status = "Executed",
+                    message = "Controlled-user change applied.",
                     result,
                 });
             }

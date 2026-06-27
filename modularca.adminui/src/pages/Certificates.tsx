@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { apiGet, apiPostWithMfa, apiBlob } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
@@ -63,8 +64,27 @@ function parseSans(raw: any): string[] | null {
 const Certificates: React.FC = () => {
     const { requireStepUp } = useStepUp();
     const { showToast } = useToast();
-    const [search, setSearch] = useState('');
-    const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'revoked' | 'expired'>('all');
+    const [searchParams] = useSearchParams();
+    // Top bar (always visible) — free-text + status. Prefilled from the URL so links
+    // like /admin/certificates?search=<serial> or ?caId=<id> land pre-filtered.
+    const [search, setSearch] = useState(() => searchParams.get('search') || '');
+    const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'revoked' | 'expired'>(
+        () => (['active', 'revoked', 'expired'].includes(searchParams.get('status') || '')
+            ? (searchParams.get('status') as any) : 'all'));
+    // Advanced filters (collapsible) — structured params the same endpoint already accepts.
+    const [serialFilter, setSerialFilter] = useState(() => searchParams.get('serial') || '');
+    const [sanFilter, setSanFilter] = useState(() => searchParams.get('san') || '');
+    const [issuerFilter, setIssuerFilter] = useState(() => searchParams.get('issuer') || '');
+    const [caIdFilter, setCaIdFilter] = useState(() => searchParams.get('caId') || '');
+    const [keyAlgorithmFilter, setKeyAlgorithmFilter] = useState(() => searchParams.get('keyAlgorithm') || '');
+    const [notAfterFrom, setNotAfterFrom] = useState(() => searchParams.get('notAfterFrom') || '');
+    const [notAfterTo, setNotAfterTo] = useState(() => searchParams.get('notAfterTo') || '');
+    const [issuedFrom, setIssuedFrom] = useState(() => searchParams.get('issuedFrom') || '');
+    const [issuedTo, setIssuedTo] = useState(() => searchParams.get('issuedTo') || '');
+    const [authorities, setAuthorities] = useState<any[]>([]);
+    const [showAdvanced, setShowAdvanced] = useState(() =>
+        ['serial', 'san', 'issuer', 'caId', 'keyAlgorithm', 'notAfterFrom', 'notAfterTo', 'issuedFrom', 'issuedTo']
+            .some((k) => searchParams.get(k)));
     const [page, setPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
     const [certificates, setCertificates] = useState<any[]>([]);
@@ -117,14 +137,54 @@ const Certificates: React.FC = () => {
     };
 
 
+    // Fetch CAs for the issuing-CA filter dropdown (flattened across the hierarchy).
+    useEffect(() => {
+        apiGet<any>('/api/v1/admin/authorities')
+            .then((data) => {
+                const cas = Array.isArray(data) ? data : (data.items || data.authorities || []);
+                const flat: any[] = [];
+                const flatten = (list: any[]) => { for (const ca of list) { flat.push(ca); if (ca.children) flatten(ca.children); } };
+                flatten(cas);
+                setAuthorities(flat);
+            })
+            .catch(() => { /* non-critical — the filter just won't list CAs */ });
+    }, []);
+
+    // Debounce the free-typing filters: only snapshot them 1.5s after typing stops, so we
+    // fetch once when input settles rather than on every keystroke. Discrete controls
+    // (status / CA / key algorithm / dates) reset page + fetch immediately via their onChange.
+    const [dSearch, setDSearch] = useState(search);
+    const [dSerial, setDSerial] = useState(serialFilter);
+    const [dSan, setDSan] = useState(sanFilter);
+    const [dIssuer, setDIssuer] = useState(issuerFilter);
+    useEffect(() => {
+        const t = setTimeout(() => {
+            setDSearch(search);
+            setDSerial(serialFilter);
+            setDSan(sanFilter);
+            setDIssuer(issuerFilter);
+            setPage(1);
+        }, 1500);
+        return () => clearTimeout(t);
+    }, [search, serialFilter, sanFilter, issuerFilter]);
+
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
         setError(null);
 
         const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
-        if (search) params.set('search', search);
+        if (dSearch) params.set('search', dSearch);
         if (statusFilter !== 'all') params.set('status', statusFilter);
+        if (dSerial) params.set('serial', dSerial);
+        if (dSan) params.set('san', dSan);
+        if (dIssuer) params.set('issuer', dIssuer);
+        if (caIdFilter) params.set('caId', caIdFilter);
+        if (keyAlgorithmFilter) params.set('keyAlgorithm', keyAlgorithmFilter);
+        if (notAfterFrom) params.set('notAfterFrom', notAfterFrom);
+        if (notAfterTo) params.set('notAfterTo', notAfterTo);
+        if (issuedFrom) params.set('issuedFrom', issuedFrom);
+        if (issuedTo) params.set('issuedTo', issuedTo);
 
         apiGet<any>(`/api/v1/admin/certificates?${params}`)
             .then((data) => {
@@ -143,7 +203,7 @@ const Certificates: React.FC = () => {
             });
 
         return () => { cancelled = true; };
-    }, [page, search, statusFilter, refreshTrigger]);
+    }, [page, dSearch, statusFilter, dSerial, dSan, dIssuer, caIdFilter, keyAlgorithmFilter, notAfterFrom, notAfterTo, issuedFrom, issuedTo, refreshTrigger]);
 
     const openRevokeModal = (cert: any) => {
         setRevokeTarget(cert);
@@ -199,7 +259,7 @@ const Certificates: React.FC = () => {
     // the auth token lookup, CSRF header, refresh handling, and credentials mode.
     const handleDownloadPem = async (cert: any) => {
         try {
-            const resp = await apiBlob(`/api/v1/user/certificates/${cert.serialNumber}/file`, {
+            const resp = await apiBlob(`/api/v1/admin/certificates/${cert.serialNumber}/file`, {
                 headers: { Accept: 'application/x-pem-file' },
             });
             const pem = await resp.text();
@@ -209,12 +269,16 @@ const Certificates: React.FC = () => {
 
     const handleDownloadDer = async (cert: any) => {
         try {
-            const resp = await apiBlob(`/api/v1/user/certificates/${cert.serialNumber}/file`, {
+            const resp = await apiBlob(`/api/v1/admin/certificates/${cert.serialNumber}/file`, {
                 headers: { Accept: 'application/pkix-cert' },
             });
             const blob = await resp.blob();
             downloadBlob(blob, `${getCertName(cert)}.crt`, 'application/pkix-cert');
         } catch (err: any) { showToast('error', err.message || 'Download failed'); }
+    };
+
+    const handleCopySerial = (serial: string) => {
+        navigator.clipboard.writeText(serial).then(() => showToast('success', 'Serial copied')).catch(() => {});
     };
 
     const handleDownloadChainPem = async (cert: any) => {
@@ -255,6 +319,17 @@ const Certificates: React.FC = () => {
         }
     };
 
+    const advInput = 'w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500';
+    const advLabel = 'block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1';
+    const advancedActive = !!(serialFilter || sanFilter || issuerFilter || caIdFilter || keyAlgorithmFilter || notAfterFrom || notAfterTo || issuedFrom || issuedTo);
+    const clearAdvanced = () => {
+        setSerialFilter(''); setSanFilter(''); setIssuerFilter(''); setCaIdFilter('');
+        setKeyAlgorithmFilter(''); setNotAfterFrom(''); setNotAfterTo(''); setIssuedFrom(''); setIssuedTo('');
+        // Clear the debounced snapshots too so the refetch is immediate (not after the 1.5s debounce).
+        setDSerial(''); setDSan(''); setDIssuer('');
+        setPage(1);
+    };
+
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Certificates</h1>
@@ -263,9 +338,9 @@ const Certificates: React.FC = () => {
             <div className="flex flex-wrap gap-4 items-center">
                 <input
                     type="text"
-                    placeholder="Search by subject or serial..."
+                    placeholder="Search subject, serial, SAN, or issuer..."
                     value={search}
-                    onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                    onChange={(e) => setSearch(e.target.value)}
                     className="flex-1 min-w-[250px] px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500"
                 />
                 <select
@@ -278,7 +353,79 @@ const Certificates: React.FC = () => {
                     <option value="revoked">Revoked</option>
                     <option value="expired">Expired</option>
                 </select>
+                <button
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    className={`px-3 py-2 text-sm rounded border transition-colors ${advancedActive
+                        ? 'bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700'
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-700'}`}
+                >
+                    {showAdvanced ? 'Hide advanced' : 'Advanced filters'}{advancedActive ? ' •' : ''}
+                </button>
             </div>
+
+            {/* Advanced filters (collapsible) */}
+            {showAdvanced && (
+                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div>
+                        <label className={advLabel}>Serial Number</label>
+                        <input type="text" value={serialFilter} onChange={(e) => setSerialFilter(e.target.value)} placeholder="e.g. 01AB3F..." className={advInput} />
+                    </div>
+                    <div>
+                        <label className={advLabel}>Subject Alternative Name</label>
+                        <input type="text" value={sanFilter} onChange={(e) => setSanFilter(e.target.value)} placeholder="e.g. *.example.com" className={advInput} />
+                    </div>
+                    <div>
+                        <label className={advLabel}>Issuing CA</label>
+                        <select value={caIdFilter} onChange={(e) => { setCaIdFilter(e.target.value); setPage(1); }} className={advInput}>
+                            <option value="">All CAs</option>
+                            {authorities.map((ca) => (
+                                <option key={ca.id} value={ca.id}>{ca.label || ca.name || ca.commonName || ca.subjectDN || ca.id}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className={advLabel}>Issuer DN</label>
+                        <input type="text" value={issuerFilter} onChange={(e) => setIssuerFilter(e.target.value)} placeholder="e.g. CN=My CA" className={advInput} />
+                    </div>
+                    <div>
+                        <label className={advLabel}>Key Algorithm</label>
+                        <select value={keyAlgorithmFilter} onChange={(e) => { setKeyAlgorithmFilter(e.target.value); setPage(1); }} className={advInput}>
+                            <option value="">All Algorithms</option>
+                            <option value="RSA">RSA</option>
+                            <option value="ECDSA">ECDSA</option>
+                            <option value="Ed25519">Ed25519</option>
+                            <option value="Ed448">Ed448</option>
+                            <option value="DSA">DSA</option>
+                        </select>
+                    </div>
+                    <div className="hidden lg:block" />
+                    <div>
+                        <label className={advLabel}>Expires After</label>
+                        <input type="date" value={notAfterFrom} onChange={(e) => { setNotAfterFrom(e.target.value); setPage(1); }} className={advInput} />
+                    </div>
+                    <div>
+                        <label className={advLabel}>Expires Before</label>
+                        <input type="date" value={notAfterTo} onChange={(e) => { setNotAfterTo(e.target.value); setPage(1); }} className={advInput} />
+                    </div>
+                    <div className="hidden lg:block" />
+                    <div>
+                        <label className={advLabel}>Issued After</label>
+                        <input type="date" value={issuedFrom} onChange={(e) => { setIssuedFrom(e.target.value); setPage(1); }} className={advInput} />
+                    </div>
+                    <div>
+                        <label className={advLabel}>Issued Before</label>
+                        <input type="date" value={issuedTo} onChange={(e) => { setIssuedTo(e.target.value); setPage(1); }} className={advInput} />
+                    </div>
+                    <div className="flex items-end">
+                        {advancedActive && (
+                            <button onClick={clearAdvanced}
+                                className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white border border-gray-300 dark:border-gray-700 rounded transition-colors">
+                                Clear advanced
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* Certificate List */}
             <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
@@ -484,6 +631,10 @@ const Certificates: React.FC = () => {
                                             <button onClick={() => handleDownloadChainPem(cert)}
                                                 className="px-3 py-1 text-xs bg-cyan-900/50 text-cyan-300 border border-cyan-700 rounded hover:bg-cyan-900 transition-colors">
                                                 Full Chain
+                                            </button>
+                                            <button onClick={() => handleCopySerial(cert.serialNumber || '')}
+                                                className="px-3 py-1 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-400 dark:border-gray-600 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
+                                                Copy Serial
                                             </button>
                                         </div>
                                     </div>

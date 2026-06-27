@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 export interface DatabaseData {
     rootHost: string;
@@ -35,6 +36,7 @@ const labelClass = "block text-sm font-medium text-gray-700 dark:text-gray-300 m
 const DatabaseConfig: React.FC<DatabaseConfigProps> = ({
     data, onChange, setupToken, needsDbConfig, staleDb, onNext,
 }) => {
+    const autoFocusRef = useAutoFocus<HTMLInputElement>();
     const [testingDb, setTestingDb] = useState(false);
     const [dbTestResult, setDbTestResult] = useState<{ connected: boolean; error?: string; databaseExists?: boolean } | null>(null);
     const [restarting, setRestarting] = useState(false);
@@ -252,7 +254,7 @@ const DatabaseConfig: React.FC<DatabaseConfigProps> = ({
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
                             <label className={labelClass}>Host</label>
-                            <input type="text" value={data.rootHost}
+                            <input ref={autoFocusRef} type="text" value={data.rootHost}
                                 onChange={e => onChange({ ...data, rootHost: e.target.value })}
                                 placeholder="localhost" className={inputClass} />
                         </div>

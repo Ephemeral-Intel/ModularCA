@@ -1,4 +1,5 @@
 import React, { useMemo, useState } from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 export interface AdminAccountData {
     username: string;
@@ -26,6 +27,7 @@ const passwordRules: PasswordRule[] = [
 ];
 
 const AdminAccount: React.FC<AdminAccountProps> = ({ data, onChange }) => {
+    const autoFocusRef = useAutoFocus<HTMLInputElement>();
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirm, setShowConfirm] = useState(false);
 
@@ -48,6 +50,7 @@ const AdminAccount: React.FC<AdminAccountProps> = ({ data, onChange }) => {
                         Username <span className="text-red-500">*</span>
                     </label>
                     <input
+                        ref={autoFocusRef}
                         id="username"
                         type="text"
                         required

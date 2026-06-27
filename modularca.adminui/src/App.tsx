@@ -1,5 +1,5 @@
 import React, { Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -21,12 +21,11 @@ import MfaCallbackPage from './pages/MfaCallback';
 const Dashboard = React.lazy(() => import('./pages/Dashboard'));
 const Certificates = React.lazy(() => import('./pages/Certificates'));
 const IssueCertificate = React.lazy(() => import('./pages/IssueCertificate'));
-const CertificateSearch = React.lazy(() => import('./pages/CertificateSearch'));
 const ExpiryCalendar = React.lazy(() => import('./pages/ExpiryCalendar'));
 const CertificateRequests = React.lazy(() => import('./pages/CertificateRequests'));
 const CaManagement = React.lazy(() => import('./pages/CaManagement'));
 const ProtocolConfig = React.lazy(() => import('./pages/ProtocolConfig'));
-const CrlManagement = React.lazy(() => import('./pages/CrlManagement'));
+const Distribution = React.lazy(() => import('./pages/Distribution'));
 const ProfileManagement = React.lazy(() => import('./pages/ProfileManagement'));
 const AcmeManagement = React.lazy(() => import('./pages/AcmeManagement'));
 const SshCertificates = React.lazy(() => import('./pages/SshCertificates'));
@@ -44,13 +43,10 @@ const SystemHealth = React.lazy(() => import('./pages/SystemHealth'));
 const TrustAnchors = React.lazy(() => import('./pages/TrustAnchors'));
 const MySecurity = React.lazy(() => import('./pages/MySecurity'));
 const CertInventory = React.lazy(() => import('./pages/CertInventory'));
-const Vulnerabilities = React.lazy(() => import('./pages/Vulnerabilities'));
 const Compliance = React.lazy(() => import('./pages/Compliance'));
-const KeyCeremonies = React.lazy(() => import('./pages/KeyCeremonies'));
-const QuotaManagement = React.lazy(() => import('./pages/QuotaManagement'));
-const TenantManagement = React.lazy(() => import('./pages/TenantManagement'));
+const Ceremonies = React.lazy(() => import('./pages/Ceremonies'));
+const TenantsAndQuotas = React.lazy(() => import('./pages/TenantsAndQuotas'));
 const Whitelists = React.lazy(() => import('./pages/Whitelists'));
-const LdapPublishers = React.lazy(() => import('./pages/LdapPublishers'));
 const Schedules = React.lazy(() => import('./pages/Schedules'));
 const NotFound = React.lazy(() => import('./pages/NotFound'));
 
@@ -59,6 +55,13 @@ const NotFound = React.lazy(() => import('./pages/NotFound'));
 // a single edit. Mirror these in Layout.tsx's sidenav definitions.
 const ADMIN_ONLY = ['Administrator'];
 const ADMIN_OPERATOR = ['Administrator', 'Operator'];
+
+// The per-CA LDAP route is retired in favor of the unified Distribution page.
+// Redirect it (preserving the CA) so old links/bookmarks land on the LDAP tab.
+const LdapCaRedirect: React.FC = () => {
+    const { caId } = useParams<{ caId: string }>();
+    return <Navigate to={`/distribution?tab=ldap${caId ? `&caId=${caId}` : ''}`} replace />;
+};
 
 const PageLoader = () => (
     <div className="flex items-center justify-center h-64">
@@ -95,15 +98,18 @@ const App: React.FC = () => {
                                                             {/* Certificates */}
                                                             <Route path="/certificates" element={<Certificates />} />
                                                             <Route path="/certificates/request" element={<IssueCertificate />} />
-                                                            <Route path="/certificates/search" element={<CertificateSearch />} />
+                                                            {/* Certificate Search merged into the Certificates page (advanced filters). */}
+                                                            <Route path="/certificates/search" element={<Navigate to="/certificates" replace />} />
                                                             <Route path="/certificates/expiry" element={<ExpiryCalendar />} />
                                                             <Route path="/certificates/requests" element={<CertificateRequests />} />
 
                                                             {/* CA Management */}
                                                             <Route path="/authorities/manage" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><CaManagement /></ProtectedRoute>} />
                                                             <Route path="/authorities/protocols" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><ProtocolConfig /></ProtectedRoute>} />
-                                                            <Route path="/crl" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><CrlManagement /></ProtectedRoute>} />
-                                                            <Route path="/authorities/:caId/ldap" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><LdapPublishers /></ProtectedRoute>} />
+                                                            <Route path="/distribution" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><Distribution /></ProtectedRoute>} />
+                                                            {/* CRL Management merged into the Distribution page; redirect old paths. */}
+                                                            <Route path="/crl" element={<Navigate to="/distribution" replace />} />
+                                                            <Route path="/authorities/:caId/ldap" element={<LdapCaRedirect />} />
                                                             <Route path="/trust-anchors" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><TrustAnchors /></ProtectedRoute>} />
 
                                                             {/* Profiles */}
@@ -119,12 +125,14 @@ const App: React.FC = () => {
                                                             <Route path="/groups" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><GroupManagement /></ProtectedRoute>} />
                                                             <Route path="/roles" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><RoleManagement /></ProtectedRoute>} />
                                                             <Route path="/enrollment" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><EnrollmentManagement /></ProtectedRoute>} />
-                                                            <Route path="/ceremonies" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><KeyCeremonies /></ProtectedRoute>} />
-                                                            <Route path="/quotas" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><QuotaManagement /></ProtectedRoute>} />
+                                                            <Route path="/ceremonies" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><Ceremonies /></ProtectedRoute>} />
+                                                            {/* Quotas merged into Tenants & Quotas — redirect the old path. */}
+                                                            <Route path="/quotas" element={<Navigate to="/tenants" replace />} />
 
                                                             {/* Intelligence */}
                                                             <Route path="/intel/inventory" element={<CertInventory />} />
-                                                            <Route path="/intel/vulnerabilities" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><Vulnerabilities /></ProtectedRoute>} />
+                                                            {/* Vulnerabilities merged into Compliance — redirect the old path. */}
+                                                            <Route path="/intel/vulnerabilities" element={<Navigate to="/intel/compliance" replace />} />
                                                             <Route path="/intel/compliance" element={<ProtectedRoute requiredRoles={ADMIN_OPERATOR}><Compliance /></ProtectedRoute>} />
 
                                                             {/* Monitoring */}
@@ -135,7 +143,7 @@ const App: React.FC = () => {
                                                             <Route path="/security" element={<MySecurity />} />
 
                                                             {/* Administration */}
-                                                            <Route path="/tenants" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><TenantManagement /></ProtectedRoute>} />
+                                                            <Route path="/tenants" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><TenantsAndQuotas /></ProtectedRoute>} />
                                                             <Route path="/whitelists" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><Whitelists /></ProtectedRoute>} />
                                                             <Route path="/settings" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><Settings /></ProtectedRoute>} />
                                                             <Route path="/backup" element={<ProtectedRoute requiredRoles={ADMIN_ONLY}><BackupRestore /></ProtectedRoute>} />

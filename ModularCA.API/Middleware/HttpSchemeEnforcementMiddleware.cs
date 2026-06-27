@@ -48,6 +48,14 @@ namespace ModularCA.API.Middleware
             new PathString("/acme"),
             new PathString("/api/v1/acme"),
             new PathString("/.well-known/acme-challenge"),
+            // Public portal SPA + its read-only info endpoint are reachable over plain
+            // HTTP as well as HTTPS, consistent with the PKI distribution surface above
+            // (relying parties may not have TLS trust established yet). The portal's other
+            // calls (/api/v1/public/ca, /crl, /ocsp, /acme) are already allow-listed.
+            // NOTE: /api/v1/public/enroll is deliberately NOT listed — enrollment tokens
+            // travel in the URL and must stay on HTTPS.
+            new PathString("/public"),
+            new PathString("/api/v1/public/info"),
         };
 
         /// <summary>

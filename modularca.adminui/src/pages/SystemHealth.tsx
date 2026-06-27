@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { apiGet, apiPost, apiPut, apiDelete, apiPostWithMfa } from '../api/client';
+import { apiGet, apiPost, apiPut, apiDelete, apiPostWithMfa, getToken } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
@@ -35,6 +35,18 @@ const healthBadgeStatus = (status: string): 'active' | 'expired' | 'revoked' => 
     return 'revoked';
 };
 
+// /health/ready is the full, authorized readiness payload — the bare /health is a
+// minimal anonymous shim with no checks. It needs the bearer token and returns 503
+// when degraded/unhealthy, so we read the JSON body regardless of status code (a
+// degraded node still has a payload worth showing).
+async function fetchHealthReady(): Promise<any> {
+    const token = getToken();
+    const res = await fetch('/health/ready', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    return res.json();
+}
+
 /* ─── Enhanced Health Check Card ─── */
 const HealthCheckCard: React.FC = () => {
     const [health, setHealth] = useState<any>(null);
@@ -44,8 +56,7 @@ const HealthCheckCard: React.FC = () => {
 
     const fetchHealth = () => {
         setLoading(true);
-        fetch('/health')
-            .then((res) => res.json())
+        fetchHealthReady()
             .then((data) => {
                 setHealth(data);
                 setError(null);
@@ -152,19 +163,34 @@ const HealthCheckCard: React.FC = () => {
 
 /* ─── System Status Card ─── */
 const SystemStatusCard: React.FC = () => {
-    const [pageLoadTime] = useState(Date.now());
+    // Real server uptime: fetched once from /health/ready (uptimeSeconds at fetch
+    // time), then ticked locally. Re-reads on mount, so a page refresh shows the
+    // actual server uptime instead of restarting a page-local stopwatch.
+    const [serverUptimeMs, setServerUptimeMs] = useState<number | null>(null);
+    const [fetchedAt, setFetchedAt] = useState(Date.now());
     const [now, setNow] = useState(Date.now());
 
     useEffect(() => {
+        let active = true;
+        fetchHealthReady()
+            .then((data) => {
+                if (active && typeof data?.uptimeSeconds === 'number') {
+                    setServerUptimeMs(data.uptimeSeconds * 1000);
+                    setFetchedAt(Date.now());
+                }
+            })
+            .catch(() => { /* leave uptime unknown if the probe fails */ });
         const interval = setInterval(() => setNow(Date.now()), 1000);
-        return () => clearInterval(interval);
+        return () => { active = false; clearInterval(interval); };
     }, []);
+
+    const serverUptime = serverUptimeMs != null ? serverUptimeMs + (now - fetchedAt) : null;
 
     return (
         <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-4">
             <h2 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">System Status</h2>
             <DetailField label="Application" value="ModularCA v0.1.0-rc1" />
-            <DetailField label="Session Uptime" value={formatUptime(now - pageLoadTime)} />
+            <DetailField label="Server Uptime" value={serverUptime != null ? formatUptime(serverUptime) : '—'} />
             <DetailField label="Current Time" value={new Date(now).toLocaleString()} />
         </div>
     );

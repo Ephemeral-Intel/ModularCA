@@ -23,13 +23,15 @@ public class AdminGroupController(
     ICurrentUserService currentUser,
     IAuditService audit,
     IDistributedCache cache,
-    ICaGroupAuthorizationService groupAuth) : ControllerBase
+    ICaGroupAuthorizationService groupAuth,
+    IControlledUserCeremonyService controlledUserSvc) : ControllerBase
 {
     private readonly ModularCADbContext _db = db;
     private readonly ICurrentUserService _currentUser = currentUser;
     private readonly IAuditService _audit = audit;
     private readonly IDistributedCache _cache = cache;
     private readonly ICaGroupAuthorizationService _groupAuth = groupAuth;
+    private readonly IControlledUserCeremonyService _controlledUserSvc = controlledUserSvc;
 
     /// <summary>
     /// Lists all groups the current user has access to view.
@@ -455,6 +457,36 @@ public class AdminGroupController(
         if (alreadyMember)
             return Conflict(new { error = "User is already a member of this group" });
 
+        // Controlled-user gate: adding a member to a privilege-controlled group (e.g. a CA
+        // Administrator group) promotes a controlled user. A non-super who is otherwise authorized
+        // by the tier check above must route it through a ControlledUserChange ceremony. (System
+        // groups are already super-only via AuthorizeGroupMembershipChangeAsync, so only super
+        // reaches here for those and applies directly.)
+        var groupTier = _controlledUserSvc.ClassifyGroup(group);
+        if (groupTier != null && _currentUser.User != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id))
+        {
+            var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                new Shared.Models.ControlledUserChangeParameters
+                {
+                    ChangeType = "AddGroupMember",
+                    TargetUserId = request.UserId,
+                    TargetUsername = user.Username,
+                    GroupId = id,
+                    CertificateAuthorityId = group.CertificateAuthorityId,
+                },
+                groupTier.Value,
+                _currentUser.User.Id,
+                _currentUser.User.Username ?? string.Empty);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                requiresCeremony = true,
+                message = "Adding this member promotes a controlled user and requires a controlled-user ceremony. "
+                          + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+            });
+        }
+
         var membership = new Shared.Entities.CaGroupMemberEntity
         {
             GroupId = id,
@@ -501,6 +533,35 @@ public class AdminGroupController(
 
         if (membership == null)
             return NotFound(new { error = "Membership not found" });
+
+        // Controlled-user gate (demote): removing a member from a controlled group demotes a
+        // controlled user — non-super routes it through a ceremony, with the last-user guard.
+        var demoteTier = _controlledUserSvc.ClassifyGroup(group);
+        if (demoteTier != null && _currentUser.User != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id))
+        {
+            if (await _controlledUserSvc.CountDominatingControlledUsersAsync(demoteTier.Value, userId) == 0)
+                return BadRequest(new { error = "Refusing to remove the last controlled user of this scope." });
+
+            var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                new Shared.Models.ControlledUserChangeParameters
+                {
+                    ChangeType = "RemoveGroupMember",
+                    TargetUserId = userId,
+                    GroupId = id,
+                    CertificateAuthorityId = group.CertificateAuthorityId,
+                },
+                demoteTier.Value,
+                _currentUser.User.Id,
+                _currentUser.User.Username ?? string.Empty);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                requiresCeremony = true,
+                message = "Removing this member demotes a controlled user and requires a controlled-user ceremony. "
+                          + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+            });
+        }
 
         _db.CaGroupMembers.Remove(membership);
         await _db.SaveChangesAsync();

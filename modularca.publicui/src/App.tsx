@@ -6,7 +6,6 @@ import Layout from './components/Layout';
 import Landing from './pages/Landing';
 import CaCertificates from './pages/CaCertificates';
 import CrlDownload from './pages/CrlDownload';
-import CertificateSearch from './pages/CertificateSearch';
 import AcmeDirectory from './pages/AcmeDirectory';
 import NotFound from './pages/NotFound';
 import ScrollToTop from './components/ScrollToTop';
@@ -23,7 +22,6 @@ function App() {
                                 <Route path="/" element={<Landing />} />
                                 <Route path="/certificates" element={<CaCertificates />} />
                                 <Route path="/crl" element={<CrlDownload />} />
-                                <Route path="/search" element={<CertificateSearch />} />
                                 <Route path="/acme" element={<AcmeDirectory />} />
                                 <Route path="*" element={<NotFound />} />
                             </Route>

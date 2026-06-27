@@ -148,5 +148,16 @@ public class SecurityPolicyEntity
     /// </summary>
     public int KeystoreScryptP { get; set; } = 1;
 
+    // ── Controlled-user ceremonies (user quorum) ────────────────────
+    /// <summary>
+    /// System-level "user quorum": the number of approvals required for controlled-user
+    /// ceremonies (promote/demote/delete of an admin/operator/CA-admin) when the change is
+    /// system-scoped. CA/tenant-scoped changes prefer the tenant's
+    /// <see cref="TenantEntity.UserCeremonyRequiredApprovals"/> when set, falling back here.
+    /// Distinct from the CA/key quorum. Default 1 (one other dominating approver; the
+    /// initiator is always excluded). Clamped to a minimum of 1 on write.
+    /// </summary>
+    public int UserQuorum { get; set; } = 1;
+
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

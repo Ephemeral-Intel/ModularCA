@@ -163,6 +163,10 @@ public static class StepUpOps
     public const string MtlsEnroll = "mtls-enroll";
     public const string MtlsDelete = "mtls-delete";
 
+    // Tenants
+    public const string EnableTenant = "enable-tenant";
+    public const string DisableTenant = "disable-tenant";
+
     /// <summary>
     /// The canonical allow-list consulted by <c>IssueStepUpTokenAsync</c>. Any operation
     /// string not present here is rejected at issuance time with
@@ -202,6 +206,7 @@ public static class StepUpOps
         TotpSetup, TotpVerifySetup, TotpRemove,
         WebAuthnRegister, WebAuthnDelete,
         MtlsEnroll, MtlsDelete,
+        EnableTenant, DisableTenant,
     };
 
     /// <summary>

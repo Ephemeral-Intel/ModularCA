@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 interface SetupStatus {
     configured: boolean;
@@ -33,6 +34,7 @@ const Welcome: React.FC<WelcomeProps> = ({ onNext, setupToken, onSetupTokenChang
     const [tokenValidated, setTokenValidated] = useState(false);
     const [tokenError, setTokenError] = useState<string | null>(null);
     const [validatingToken, setValidatingToken] = useState(false);
+    const autoFocusToken = useAutoFocus<HTMLInputElement>();
 
     const setupHeaders = (): Record<string, string> => {
         const csrfToken = document.cookie.match(/(?:^|;\s*)CSRF-TOKEN=([^;]*)/)?.[1] || '';
@@ -157,6 +159,7 @@ const Welcome: React.FC<WelcomeProps> = ({ onNext, setupToken, onSetupTokenChang
                     </div>
                     <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 sm:gap-4">
                         <input
+                            ref={autoFocusToken}
                             type="text"
                             value={setupToken}
                             onChange={e => { onSetupTokenChange(e.target.value); setTokenValidated(false); setTokenError(null); }}

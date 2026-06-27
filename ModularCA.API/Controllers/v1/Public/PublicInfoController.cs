@@ -1,27 +1,45 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using ModularCA.Shared.Interfaces;
 using ModularCA.Shared.Models.Config;
 
 namespace ModularCA.API.Controllers.v1.Public;
 
 /// <summary>
 /// Public (unauthenticated) endpoint that exposes non-sensitive deployment
-/// identity — the operator-configured public domain and the canonical HTTPS
-/// base URL — so the public SPA can display URLs users should copy into
-/// external tooling (certbot, acme.sh, etc.) without confusing them with the
-/// proxy-rewritable host the browser happens to see.
+/// identity — the operator-configured public domain, the canonical HTTPS base
+/// URL, and which system protocols are enabled — so the public SPA can display
+/// URLs users should copy into external tooling (certbot, acme.sh, etc.) and
+/// advertise only the protocols the deployment actually serves.
 /// </summary>
 [ApiController]
 [Route("api/v1/public/info")]
 [AllowAnonymous]
-public class PublicInfoController(SystemConfig config) : ControllerBase
+public class PublicInfoController(SystemConfig config, IFeatureFlagService featureFlags) : ControllerBase
 {
     private readonly SystemConfig _config = config;
+    private readonly IFeatureFlagService _featureFlags = featureFlags;
+
+    // System protocols surfaced to the public portal, paired with their
+    // feature-flag names (the same flags ProtocolFeatureGateMiddleware enforces).
+    // Only the enabled ones are returned, so the portal advertises exactly what
+    // the deployment serves.
+    private static readonly (string Name, string Flag)[] ProtocolFlags =
+    {
+        ("CRL", "CRL.Enabled"),
+        ("OCSP", "OCSP.Enabled"),
+        ("ACME", "ACME.Enabled"),
+        ("EST", "EST.Enabled"),
+        ("SCEP", "SCEP.Enabled"),
+        ("CMP", "CMP.Enabled"),
+    };
 
     /// <summary>
-    /// Returns <c>{ publicDomain, publicHttpsBaseUrl }</c>. Falls back to the
-    /// request's scheme/host when <c>Https.PublicDomain</c> is unset (setup
-    /// mode) so the SPA has something reasonable to render either way.
+    /// Returns <c>{ publicDomain, publicHttpsBaseUrl, enabledProtocols }</c>.
+    /// Falls back to the request's scheme/host when <c>Https.PublicDomain</c> is
+    /// unset (setup mode) so the SPA has something reasonable to render either way.
+    /// <c>enabledProtocols</c> is the subset of system protocols whose feature flag
+    /// is on.
     /// </summary>
     [HttpGet]
     public IActionResult GetInfo()
@@ -31,10 +49,16 @@ public class PublicInfoController(SystemConfig config) : ControllerBase
             ? _config.Https.GetPublicHttpsBaseUrl()
             : $"{Request.Scheme}://{Request.Host}";
 
+        var enabledProtocols = ProtocolFlags
+            .Where(p => _featureFlags.IsEnabled(p.Flag))
+            .Select(p => p.Name)
+            .ToArray();
+
         return Ok(new
         {
             publicDomain,
             publicHttpsBaseUrl = baseUrl,
+            enabledProtocols,
         });
     }
 }

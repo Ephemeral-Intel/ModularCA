@@ -122,21 +122,26 @@ const Users: React.FC = () => {
 
     const handleAddGroup = async (userId: string, groupId: string) => {
         try {
-            await apiPostWithMfa(`/api/v1/admin/users/${userId}/groups/${groupId}`, {}, requireStepUp, 'add-group-member', userId);
+            const res: any = await apiPostWithMfa(`/api/v1/admin/users/${userId}/groups/${groupId}`, {}, requireStepUp, 'add-group-member', userId);
             setAddingGroupUser(null);
             setSelectedGroupId('');
             setRefreshTrigger((t) => t + 1);
+            // Promoting a controlled user returns 202 with a ceremony instead of applying immediately.
+            if (res?.requiresCeremony)
+                showToast('info', res.message || 'A controlled-user ceremony was started — approve it on the Ceremonies page.');
         } catch (err: any) {
-            showToast('error', err.message || 'Failed to add user to group');
+            if (err.message !== 'Step-up MFA cancelled') showToast('error', err.message || 'Failed to add user to group');
         }
     };
 
     const handleRemoveGroup = async (userId: string, groupId: string) => {
         try {
-            await apiDeleteWithMfa(`/api/v1/admin/users/${userId}/groups/${groupId}`, requireStepUp, 'remove-group-member', userId);
+            const res: any = await apiDeleteWithMfa(`/api/v1/admin/users/${userId}/groups/${groupId}`, requireStepUp, 'remove-group-member', userId);
             setRefreshTrigger((t) => t + 1);
+            if (res?.requiresCeremony)
+                showToast('info', res.message || 'A controlled-user ceremony was started — approve it on the Ceremonies page.');
         } catch (err: any) {
-            showToast('error', err.message || 'Failed to remove user from group');
+            if (err.message !== 'Step-up MFA cancelled') showToast('error', err.message || 'Failed to remove user from group');
         }
     };
 
@@ -474,6 +479,32 @@ const Users: React.FC = () => {
                                                     </button>
                                                 );
                                             })()}
+                                            <button
+                                                onClick={() => {
+                                                    if (user.id === currentUserId) {
+                                                        showToast('warning', 'You cannot delete your own account.');
+                                                        return;
+                                                    }
+                                                    setConfirmAction({
+                                                        title: 'Delete User',
+                                                        message: `Permanently delete user "${user.username}"? If they hold an admin / operator / CA-admin tier, this requires a controlled-user ceremony approved by the required quorum.`,
+                                                        confirmLabel: 'Delete User',
+                                                        action: async () => {
+                                                            const res: any = await apiDeleteWithMfa(`/api/v1/admin/users/${user.id}`, requireStepUp, 'delete-user', user.id);
+                                                            setRefreshTrigger((t) => t + 1);
+                                                            if (res?.requiresCeremony)
+                                                                showToast('info', res.message || 'A controlled-user ceremony was started — approve it on the Ceremonies page.');
+                                                            else
+                                                                showToast('success', `User "${user.username}" deleted`);
+                                                        },
+                                                    });
+                                                }}
+                                                disabled={user.id === currentUserId}
+                                                className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                                                title={user.id === currentUserId ? 'You cannot delete your own account' : 'Delete this user'}
+                                            >
+                                                Delete User
+                                            </button>
                                         </div>
                                     </div>
                                 )}

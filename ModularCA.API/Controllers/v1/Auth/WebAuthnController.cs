@@ -36,6 +36,14 @@ public class WebAuthnController : ControllerBase
     private readonly ICurrentUserService _currentUser;
     private readonly IAuditService _audit;
 
+    // FIDO2 client responses (attestation/assertion) must be deserialized with plain web JSON
+    // defaults, NOT the app's MVC options. The global JsonStringEnumConverter registered in
+    // StartModularCA sits in the serializer's Converters collection, which outranks the FIDO2
+    // types' own [JsonConverter] attributes, so model binding can't turn "public-key" back into
+    // PublicKeyCredentialType. These options honour the library's attributes instead.
+    private static readonly System.Text.Json.JsonSerializerOptions Fido2JsonOptions =
+        new(System.Text.Json.JsonSerializerDefaults.Web);
+
     /// <summary>
     /// Initializes a new instance of the <see cref="WebAuthnController"/> class.
     /// </summary>
@@ -119,7 +127,11 @@ public class WebAuthnController : ControllerBase
             AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(webAuthnTtl)
         });
 
-        return Ok(options);
+        // Return the FIDO2 library's own JSON, NOT Ok(options). The global
+        // JsonStringEnumConverter (see StartModularCA) would otherwise stringify the WebAuthn
+        // enums — alg -7 becomes "ES256", type becomes "PublicKey" — and the browser rejects
+        // those options with NotSupportedError. optionsJson is the spec-correct serialization.
+        return Content(optionsJson, "application/json");
     }
 
     /// <summary>
@@ -128,13 +140,31 @@ public class WebAuthnController : ControllerBase
     /// </summary>
     [Authorize]
     [HttpPost("register")]
-    public async Task<IActionResult> Register([FromBody] AuthenticatorAttestationRawResponse attestationResponse, [FromQuery] string? deviceName = null, [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+    public async Task<IActionResult> Register([FromQuery] string? deviceName = null, [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
     {
         if (_fido2 == null)
             return BadRequest(new { error = "WebAuthn is not enabled on this server" });
         var userId = _currentUser.UserId;
         if (userId == null)
             return Unauthorized(new { error = "Authentication required" });
+
+        // Parse the attestation response manually (see Fido2JsonOptions) instead of via
+        // [FromBody], so the FIDO2 enum/base64url converters apply and a malformed body yields a
+        // clean 400 rather than the raw model-binding validation error ("$.type could not be
+        // converted to PublicKeyCredentialType").
+        AuthenticatorAttestationRawResponse? attestationResponse;
+        try
+        {
+            using var reader = new System.IO.StreamReader(Request.Body, System.Text.Encoding.UTF8);
+            var body = await reader.ReadToEndAsync();
+            attestationResponse = System.Text.Json.JsonSerializer.Deserialize<AuthenticatorAttestationRawResponse>(body, Fido2JsonOptions);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return BadRequest(new { error = "Malformed attestation response." });
+        }
+        if (attestationResponse is null)
+            return BadRequest(new { error = "Attestation response is required." });
 
         // If the user already has a verified MFA factor
         // (TOTP, another WebAuthn key, or an active mTLS credential), require
@@ -164,12 +194,20 @@ public class WebAuthnController : ControllerBase
             return !exists;
         };
 
-        var result = await _fido2.MakeNewCredentialAsync(new MakeNewCredentialParams
+        RegisteredPublicKeyCredential result;
+        try
         {
-            AttestationResponse = attestationResponse,
-            OriginalOptions = options,
-            IsCredentialIdUniqueToUserCallback = credentialIdUniqueCallback
-        }, HttpContext.RequestAborted);
+            result = await _fido2.MakeNewCredentialAsync(new MakeNewCredentialParams
+            {
+                AttestationResponse = attestationResponse,
+                OriginalOptions = options,
+                IsCredentialIdUniqueToUserCallback = credentialIdUniqueCallback
+            }, HttpContext.RequestAborted);
+        }
+        catch (Fido2VerificationException ex)
+        {
+            return BadRequest(new { error = $"Security key could not be verified: {ex.Message}" });
+        }
 
         var credential = new Fido2CredentialEntity
         {
@@ -257,7 +295,9 @@ public class WebAuthnController : ControllerBase
             AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(loginWebAuthnTtl)
         });
 
-        return Ok(options);
+        // Return the library's spec-correct JSON, not Ok(options) — the global
+        // JsonStringEnumConverter mangles the WebAuthn enums into strings the browser rejects.
+        return Content(optionsJson, "application/json");
     }
 
     /// <summary>
@@ -269,10 +309,27 @@ public class WebAuthnController : ControllerBase
     /// </summary>
     [AllowAnonymous]
     [HttpPost("assertion")]
-    public async Task<IActionResult> VerifyAssertion([FromBody] WebAuthnAssertionRequest request)
+    public async Task<IActionResult> VerifyAssertion()
     {
         if (_fido2 == null)
             return BadRequest(new { error = "WebAuthn is not enabled on this server" });
+
+        // Parse manually (see Fido2JsonOptions) rather than via [FromBody]: the global
+        // JsonStringEnumConverter would otherwise fail to read the nested assertion response's
+        // "type":"public-key", producing a raw model-binding 400.
+        WebAuthnAssertionRequest? request;
+        try
+        {
+            using var reader = new System.IO.StreamReader(Request.Body, System.Text.Encoding.UTF8);
+            var body = await reader.ReadToEndAsync();
+            request = System.Text.Json.JsonSerializer.Deserialize<WebAuthnAssertionRequest>(body, Fido2JsonOptions);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return BadRequest(new { error = "Malformed assertion response." });
+        }
+        if (request is null)
+            return BadRequest(new { error = "Assertion response is required." });
 
         // MFA token is required — username-only fallback removed to ensure
         // the caller has completed password authentication before WebAuthn assertion.

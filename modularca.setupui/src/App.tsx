@@ -177,10 +177,12 @@ const WizardContent: React.FC = () => {
     // Passed from Welcome → Database step; controls whether Database auto-skips.
     const [dbStatus, setDbStatus] = useState<WelcomeResult>({ needsDbConfig: true, staleDb: false });
 
-    // On step change, scroll to top and reset tab order.
+    // On step change, scroll back to the top. Per-step focus is handled by each
+    // page's first field via the autoFocus prop, which fires reliably when the
+    // field mounts — including StrictMode remounts and the Welcome step's
+    // async-rendered token field — without depending on effect timing.
     useEffect(() => {
         window.scrollTo(0, 0);
-        (document.activeElement as HTMLElement | null)?.blur();
     }, [step]);
 
     // First time the user lands on the Web TLS step, pre-fill CN + SANs from the

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { apiGet, apiPost, apiPut, apiDelete, apiPutWithMfa, apiPostWithMfa, apiDeleteWithMfa } from '../api/client';
+import { apiGet, apiPost, apiPut, apiPutWithMfa, apiPostWithMfa } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
@@ -69,6 +69,15 @@ const SaveButton: React.FC<{ saving: boolean; onClick: () => void; label?: strin
     <button onClick={onClick} disabled={saving} className="px-4 py-2 text-sm bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 disabled:opacity-50 transition-colors">
         {saving ? 'Saving...' : (label || 'Save')}
     </button>
+);
+
+/* Note shown on cards whose cron schedule is owned by the Schedules page. The card's
+   Save deliberately sends an empty `schedule`, which the backend patch-guards
+   (`if (!IsNullOrEmpty) ...`) so a stale Settings tab can't clobber a cron edited there. */
+const ScheduleMovedNote = () => (
+    <p className="text-[11px] text-gray-500 dark:text-gray-500">
+        The run schedule (cron) is managed on the <Link to="/schedules" className="underline hover:text-gray-700 dark:hover:text-gray-300">Schedules</Link> page.
+    </p>
 );
 
 const LiveTag = () => <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-400 border border-green-300 dark:border-green-800">Live</span>;
@@ -162,13 +171,6 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
     const [securityPolicyError, setSecurityPolicyError] = useState<string | null>(null);
     const [securityPolicySaving, setSecurityPolicySaving] = useState(false);
 
-    /* Enrollment Tokens state (inlined into Security tab) */
-    const [tokens, setTokens] = useState<any[]>([]);
-    const [tokensLoading, setTokensLoading] = useState(false);
-    const [tokensError, setTokensError] = useState<string | null>(null);
-    const [tokensExpandedKey, setTokensExpandedKey] = useState<string | null>(null);
-    const [generating, setGenerating] = useState(false);
-
     const load = () => {
         setLoading(true);
         apiGet<any>('/api/v1/admin/config')
@@ -208,22 +210,12 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
             .finally(() => setRateLimitsLoading(false));
     };
 
-    const loadTokens = () => {
-        setTokensLoading(true);
-        setTokensError(null);
-        apiGet<any>('/api/v1/admin/enrollment-tokens')
-            .then((data) => setTokens(Array.isArray(data) ? data : (data.items || data.tokens || [])))
-            .catch((err) => setTokensError(err.message))
-            .finally(() => setTokensLoading(false));
-    };
-
     useEffect(() => {
         load();
         if (tab === 'Security') {
             loadPolicy();
             loadSecurityPolicy();
             loadRateLimits();
-            loadTokens();
         }
     }, [tab]);
 
@@ -300,28 +292,6 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
     const policyNumberFields = ['minLength', 'maxLength', 'minUppercase', 'minLowercase', 'minDigits', 'minSpecial', 'maxAgeDays', 'historyCount'];
     const policyBoolFields = ['requireUppercase', 'requireLowercase', 'requireDigit', 'requireSymbol'];
 
-    /* --- Enrollment Token helpers --- */
-    const handleGenerateToken = async () => {
-        setGenerating(true);
-        try {
-            await apiPost('/api/v1/admin/enrollment-tokens', {});
-            loadTokens();
-        } catch (err: any) {
-            showToast('error', err.message || 'Failed to generate token');
-        } finally {
-            setGenerating(false);
-        }
-    };
-    const handleRevokeToken = async (token: any) => {
-        if (!window.confirm('Revoke this enrollment token?')) return;
-        try {
-            await apiDelete(`/api/v1/admin/enrollment-tokens/${token.id}`);
-            loadTokens();
-        } catch (err: any) {
-            showToast('error', err.message || 'Failed to revoke token');
-        }
-    };
-
     return (
         <div className="space-y-2">
             {successMsg && (
@@ -371,8 +341,8 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                     <ConfigInput label="CORS Origins (comma-separated)" value={config.http.corsOrigins} onChange={(v) => update('http', 'corsOrigins', v)} />
                                     <ConfigToggle label="Enable CORS" checked={config.http.enableCors ?? false} onChange={(v) => update('http', 'enableCors', v)} />
                                     <ConfigToggle label="Swagger Enabled" checked={config.http.swaggerEnabled} onChange={(v) => update('http', 'swaggerEnabled', v)} />
-                                    <ConfigInput label="Trusted Proxy CIDRs" value={config.http.trustedProxyCidrs} onChange={(v) => update('http', 'trustedProxyCidrs', v)} placeholder="10.0.0.0/8, 172.16.0.0/12" />
                                 </div>
+                                <p className="text-[10px] text-gray-600">Trusted Proxy CIDRs moved to the <strong>Reverse Proxy</strong> card (Security tab).</p>
                                 <SaveButton saving={saving === 'http'} onClick={() => saveSection('http', config.http, 'http')} />
                             </div>
                         )}
@@ -442,18 +412,18 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                     {/* Backup */}
                     <div className={cardClass}>
                         <SectionHeader title="Backup" expanded={expanded === 'backup'} onToggle={() => toggle('backup')}
-                            description={`Schedule: ${config.backup?.schedule || 'Not set'}`} tag="restart" />
+                            description={`Retain ${config.backup?.retentionCount ?? 0} · ${config.backup?.outputPath || 'default path'}`} tag="restart" />
                         {expanded === 'backup' && (
                             <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <ConfigInput label="Schedule (cron)" value={config.backup?.schedule} onChange={(v) => update('backup', 'schedule', v)} placeholder="0 2 * * *" />
                                     <ConfigInput label="Output Path" value={config.backup?.outputPath} onChange={(v) => update('backup', 'outputPath', v)} />
                                     <ConfigNumber label="Retention Count" value={config.backup?.retentionCount} onChange={(v) => update('backup', 'retentionCount', v)} />
                                     <ConfigNumber label="Max Backup Age Days" value={config.backup?.maxBackupAgeDays} onChange={(v) => update('backup', 'maxBackupAgeDays', v)} />
                                     <ConfigToggle label="Verify on Schedule" checked={config.backup?.verifyOnSchedule ?? true} onChange={(v) => update('backup', 'verifyOnSchedule', v)} />
                                     <ConfigNumber label="Verify Count" value={config.backup?.verifyCount} onChange={(v) => update('backup', 'verifyCount', v)} />
                                 </div>
-                                <SaveButton saving={saving === 'backup'} onClick={() => saveSection('backup', config.backup, 'backup')} />
+                                <ScheduleMovedNote />
+                                <SaveButton saving={saving === 'backup'} onClick={() => saveSection('backup', { ...config.backup, schedule: '' }, 'backup')} />
                             </div>
                         )}
                     </div>
@@ -464,7 +434,7 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                             <div>
                                 <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Restart Application</h3>
                                 <p className="text-xs text-gray-600 mt-1">
-                                    Apply pending configuration changes that require a restart (logging, HTTP, scheduler, HTTPS).
+                                    Apply pending configuration changes that require a restart (logging, HTTP, HTTPS).
                                     The application will shut down and the process manager will restart it.
                                 </p>
                             </div>
@@ -508,18 +478,62 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
             {/* ================================================================ */}
             {tab === 'Security' && (
                 <>
-                    {/* Security (middleware) — yaml-backed, for knobs wired at startup */}
+                    {/* Login Protection — unifies the two anti-password-guessing layers
+                        (account lockout in the DB policy + per-username rate limit in the
+                        yaml middleware). Each layer saves to its own endpoint. */}
                     <div className={cardClass}>
-                        <SectionHeader title="Security (middleware)" expanded={expanded === 'security'} onToggle={() => toggle('security')}
-                            description={`JWT IP binding: ${['Off', 'Exact', 'Subnet24'][config.security?.bindJwtToIp ?? 0]}`} tag="restart" />
-                        {expanded === 'security' && (
+                        <SectionHeader title="Login Protection" expanded={expanded === 'loginProtection'} onToggle={() => toggle('loginProtection')}
+                            description={securityPolicy ? `Lockout ${securityPolicy.lockoutMinutes}m / ${securityPolicy.maxFailedLoginAttempts} tries` : 'Loading...'} />
+                        {expanded === 'loginProtection' && (
                             <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
                                 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 rounded p-3 text-xs text-blue-800 dark:text-blue-300">
-                                    These knobs are wired into the request pipeline at startup (yaml-backed).
-                                    For runtime-tunable policy (session lockout, MFA TTLs, OCSP responder posture,
-                                    login banner), use the <strong>Security Policy</strong> card below.
+                                    Two independent layers defend against password guessing. <strong>Account lockout</strong> disables an
+                                    account after repeated failures and applies live. The <strong>per-username rate limit</strong> throttles
+                                    attempts in the request pipeline and is wired at startup (restart to change). Each has its own Save.
                                 </div>
-                                <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">JWT &amp; Refresh Token Binding</h4>
+
+                                {/* Account Lockout — DB SecurityPolicy (live) */}
+                                <div className="flex items-center gap-2"><h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Account Lockout</h4><LiveTag /></div>
+                                {securityPolicyLoading && <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>}
+                                {securityPolicyError && <div className="text-sm text-red-800 dark:text-red-400">{securityPolicyError}</div>}
+                                {securityPolicy && (
+                                    <>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <ConfigNumber label="Max Failed Login Attempts" value={securityPolicy.maxFailedLoginAttempts} onChange={(v) => updateSecurityPolicyField('maxFailedLoginAttempts', v)} />
+                                            <ConfigNumber label="Lockout Minutes (0 = permanent)" value={securityPolicy.lockoutMinutes} onChange={(v) => updateSecurityPolicyField('lockoutMinutes', v)} />
+                                            <ConfigNumber label="Login Response Delay (ms)" value={securityPolicy.loginResponseDelayMs} onChange={(v) => updateSecurityPolicyField('loginResponseDelayMs', v)} />
+                                        </div>
+                                        <SaveButton saving={securityPolicySaving} onClick={handleSaveSecurityPolicy} label="Save Lockout" />
+                                    </>
+                                )}
+
+                                {/* Per-Username Rate Limit — yaml middleware (restart) */}
+                                <div className="flex items-center gap-2 pt-2"><h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Per-Username Rate Limit</h4><RestartTag /></div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <ConfigNumber label="Per-Username Failure Limit" value={config.security.maxPerUsernameLoginFailures} onChange={(v) => update('security', 'maxPerUsernameLoginFailures', v)} />
+                                    <ConfigNumber label="Per-Username Failure Window (min)" value={config.security.perUsernameLoginFailureWindowMinutes} onChange={(v) => update('security', 'perUsernameLoginFailureWindowMinutes', v)} />
+                                </div>
+                                <SaveButton saving={saving === 'security'} onClick={() => saveSection('security', config.security, 'security')} label="Save Rate Limit" />
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Token Binding & Lifetime — refresh token lifetime (tokens) + JWT/refresh
+                        binding (security middleware), previously split across two cards. */}
+                    <div className={cardClass}>
+                        <SectionHeader title="Token Binding & Lifetime" expanded={expanded === 'tokenBinding'} onToggle={() => toggle('tokenBinding')}
+                            description={`Refresh ${config.tokens?.refreshTokenDays || 7}d — JWT IP binding: ${['Off', 'Exact', 'Subnet24'][config.security?.bindJwtToIp ?? 0]}`} />
+                        {expanded === 'tokenBinding' && (
+                            <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
+                                {/* Refresh Token Lifetime — tokens (live) */}
+                                <div className="flex items-center gap-2"><h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Refresh Token Lifetime</h4><LiveTag /></div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <ConfigNumber label="Refresh Token Lifetime (days)" value={config.tokens.refreshTokenDays} onChange={(v) => update('tokens', 'refreshTokenDays', v)} fallback={7} />
+                                </div>
+                                <SaveButton saving={saving === 'tokens'} onClick={() => saveSection('tokens', config.tokens, 'tokens')} label="Save Lifetime" />
+
+                                {/* JWT & Refresh Binding — yaml middleware (restart) */}
+                                <div className="flex items-center gap-2 pt-2"><h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">JWT &amp; Refresh Binding</h4><RestartTag /></div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                     <div>
                                         <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">JWT IP Binding</label>
@@ -533,24 +547,35 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                     <ConfigToggle label="Bind Refresh Token to Fingerprint" checked={config.security.bindRefreshTokenToFingerprint ?? true} onChange={(v) => update('security', 'bindRefreshTokenToFingerprint', v)} />
                                     <ConfigToggle label="Allow Refresh Token Mismatch (forensic)" checked={config.security.allowRefreshTokenMismatch ?? false} onChange={(v) => update('security', 'allowRefreshTokenMismatch', v)} />
                                 </div>
-                                <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide pt-2">Per-Username Rate Limit</h4>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <ConfigNumber label="Per-Username Failure Limit" value={config.security.maxPerUsernameLoginFailures} onChange={(v) => update('security', 'maxPerUsernameLoginFailures', v)} />
-                                    <ConfigNumber label="Per-Username Failure Window (min)" value={config.security.perUsernameLoginFailureWindowMinutes} onChange={(v) => update('security', 'perUsernameLoginFailureWindowMinutes', v)} />
-                                </div>
-                                <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide pt-2">Reverse Proxy</h4>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <ConfigToggle label="Behind Reverse Proxy" checked={config.security.behindReverseProxy ?? false} onChange={(v) => update('security', 'behindReverseProxy', v)} />
-                                </div>
-                                <SaveButton saving={saving === 'security'} onClick={() => saveSection('security', config.security, 'security')} />
+                                <SaveButton saving={saving === 'security'} onClick={() => saveSection('security', config.security, 'security')} label="Save Binding" />
                             </div>
                         )}
                     </div>
 
-                    {/* Security Policy (DB) — runtime-tunable session/MFA/OCSP/lockout/banner */}
+                    {/* Reverse Proxy — proxy mode (security) + trusted CIDRs (http), previously
+                        split across the Security and HTTP cards. */}
+                    <div className={cardClass}>
+                        <SectionHeader title="Reverse Proxy" expanded={expanded === 'reverseProxy'} onToggle={() => toggle('reverseProxy')}
+                            description={config.security?.behindReverseProxy ? 'Behind proxy' : 'Direct'} tag="restart" />
+                        {expanded === 'reverseProxy' && (
+                            <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
+                                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 rounded p-3 text-xs text-blue-800 dark:text-blue-300">
+                                    Settings for running behind a load balancer or reverse proxy. The proxy mode flag and the trusted
+                                    proxy CIDRs live in different config sections, so each has its own Save.
+                                </div>
+                                <ConfigToggle label="Behind Reverse Proxy" checked={config.security.behindReverseProxy ?? false} onChange={(v) => update('security', 'behindReverseProxy', v)} />
+                                <SaveButton saving={saving === 'security'} onClick={() => saveSection('security', config.security, 'security')} label="Save Proxy Mode" />
+                                <ConfigInput label="Trusted Proxy CIDRs" value={config.http.trustedProxyCidrs} onChange={(v) => update('http', 'trustedProxyCidrs', v)} placeholder="10.0.0.0/8, 172.16.0.0/12" />
+                                <SaveButton saving={saving === 'http'} onClick={() => saveSection('http', config.http, 'http')} label="Save Trusted CIDRs" />
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Security Policy (DB) — runtime-tunable session/MFA/OCSP/approval.
+                        Login lockout moved to the Login Protection card above. */}
                     <div className={cardClass}>
                         <SectionHeader title="Security Policy" expanded={expanded === 'securityPolicy'} onToggle={() => toggle('securityPolicy')}
-                            description={securityPolicy ? `Lockout: ${securityPolicy.lockoutMinutes}m after ${securityPolicy.maxFailedLoginAttempts} attempts` : 'Loading...'} tag="live" />
+                            description={securityPolicy ? `Session, MFA & OCSP policy` : 'Loading...'} tag="live" />
                         {expanded === 'securityPolicy' && (
                             <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
                                 {securityPolicyLoading && <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>}
@@ -561,13 +586,8 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                             Stored in the DB-backed <code className="bg-gray-900/40 px-1 rounded">SecurityPolicy</code> table.
                                             Changes take effect on the next request scope after save (step-up MFA required).
                                         </div>
-                                        <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Login Lockout</h4>
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                            <ConfigNumber label="Max Failed Login Attempts" value={securityPolicy.maxFailedLoginAttempts} onChange={(v) => updateSecurityPolicyField('maxFailedLoginAttempts', v)} />
-                                            <ConfigNumber label="Lockout Minutes (0 = permanent)" value={securityPolicy.lockoutMinutes} onChange={(v) => updateSecurityPolicyField('lockoutMinutes', v)} />
-                                            <ConfigNumber label="Login Response Delay (ms)" value={securityPolicy.loginResponseDelayMs} onChange={(v) => updateSecurityPolicyField('loginResponseDelayMs', v)} />
-                                        </div>
-                                        <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide pt-2">Session</h4>
+                                        <div className="text-[11px] text-gray-500 dark:text-gray-500">Login lockout moved to the <strong>Login Protection</strong> card above.</div>
+                                        <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Session</h4>
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                             <ConfigNumber label="Session Idle Timeout (min, 0 = none)" value={securityPolicy.sessionIdleTimeoutMinutes} onChange={(v) => updateSecurityPolicyField('sessionIdleTimeoutMinutes', v)} />
                                             <ConfigNumber label="Max Concurrent Sessions (0 = unlimited)" value={securityPolicy.maxConcurrentSessions} onChange={(v) => updateSecurityPolicyField('maxConcurrentSessions', v)} />
@@ -595,6 +615,15 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                             <ConfigNumber label="Default Good Response TTL (min)" value={securityPolicy.defaultGoodResponseTtlMinutes} onChange={(v) => updateSecurityPolicyField('defaultGoodResponseTtlMinutes', v)} />
                                             <ConfigNumber label="Default Revoked Response TTL (min)" value={securityPolicy.defaultRevokedResponseTtlMinutes} onChange={(v) => updateSecurityPolicyField('defaultRevokedResponseTtlMinutes', v)} />
                                             <ConfigNumber label="Max Single-Requests per OCSPRequest" value={securityPolicy.maxSingleRequestsPerRequest} onChange={(v) => updateSecurityPolicyField('maxSingleRequestsPerRequest', v)} />
+                                        </div>
+                                        <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide pt-2">Controlled-User Ceremonies</h4>
+                                        <p className="text-[11px] text-gray-500 dark:text-gray-500">
+                                            <strong>User quorum</strong> = approvals required to promote / demote / delete a controlled user (admin / operator / CA-admin)
+                                            when initiated by a non-super. Distinct from the <strong>key quorum</strong> (per-tenant CA-ceremony approvals, set in Tenants).
+                                            The initiator is always excluded, so the effective minimum is 1 other approver.
+                                        </p>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <ConfigNumber label="User Quorum (min 1)" value={securityPolicy.userQuorum} onChange={(v) => updateSecurityPolicyField('userQuorum', v)} fallback={1} />
                                         </div>
                                         <SaveButton saving={securityPolicySaving} onClick={handleSaveSecurityPolicy} label="Save Security Policy" />
                                     </>
@@ -743,70 +772,6 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                         )}
                     </div>
 
-                    {/* Enrollment Tokens (inlined) */}
-                    <div className={cardClass}>
-                        <SectionHeader title="Enrollment Tokens" expanded={expanded === 'enrollmentTokens'} onToggle={() => toggle('enrollmentTokens')}
-                            description={`${tokens.length} token(s)`} tag="live" />
-                        {expanded === 'enrollmentTokens' && (
-                            <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-xs text-gray-600">Manage enrollment tokens for device onboarding</span>
-                                    <button
-                                        onClick={handleGenerateToken}
-                                        disabled={generating}
-                                        className="px-4 py-2 text-sm bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                                    >
-                                        {generating ? 'Generating...' : 'Generate Token'}
-                                    </button>
-                                </div>
-                                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                                    {tokensLoading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                                    {tokensError && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{tokensError}</div>}
-                                    {!tokensLoading && !tokensError && tokens.length === 0 && (
-                                        <div className="p-4 text-sm text-gray-600 text-center">No enrollment tokens</div>
-                                    )}
-                                    {!tokensLoading && !tokensError && tokens.map((token) => {
-                                        const key = token.id;
-                                        const isExpanded = tokensExpandedKey === key;
-                                        const isActive = !token.isRevoked && (!token.expiresAt || new Date(token.expiresAt) > new Date());
-
-                                        return (
-                                            <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                                                <button
-                                                    onClick={() => setTokensExpandedKey(isExpanded ? null : key)}
-                                                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
-                                                >
-                                                    <span className="text-gray-600 text-xs">{isExpanded ? '\u25BC' : '\u25B6'}</span>
-                                                    <StatusBadge status={isActive ? 'active' : 'revoked'} label={isActive ? 'Active' : 'Revoked'} />
-                                                    <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{token.token || token.id}</span>
-                                                    <span className="ml-auto text-xs text-gray-600">{formatDate(token.createdAt)}</span>
-                                                </button>
-                                                {isExpanded && (
-                                                    <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50">
-                                                        <DetailField label="Token ID" value={token.id} mono />
-                                                        <DetailField label="Token" value={token.token} mono />
-                                                        <DetailField label="Created" value={formatDate(token.createdAt)} />
-                                                        <DetailField label="Expires" value={formatDate(token.expiresAt)} />
-                                                        <DetailField label="Used" value={token.usedAt ? formatDate(token.usedAt) : 'Not used'} />
-                                                        <DetailField label="Description" value={token.description} />
-                                                        {isActive && (
-                                                            <button
-                                                                onClick={() => handleRevokeToken(token)}
-                                                                className="mt-2 px-3 py-1 text-xs bg-red-50 dark:bg-red-900/50 text-red-800 dark:text-red-300 border border-red-300 dark:border-red-700 rounded hover:bg-red-900 transition-colors"
-                                                            >
-                                                                Revoke Token
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-
                     {/* Rate Limiting (DB) — per-protocol policy rows */}
                     <div className={cardClass}>
                         <SectionHeader title="Rate Limiting" expanded={expanded === 'rateLimiting'} onToggle={() => toggle('rateLimiting')}
@@ -836,20 +801,6 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                         <SaveButton saving={rateLimitsSaving} onClick={handleSaveRateLimits} label="Save Rate Limits" />
                                     </>
                                 )}
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Tokens */}
-                    <div className={cardClass}>
-                        <SectionHeader title="Tokens" expanded={expanded === 'tokens'} onToggle={() => toggle('tokens')}
-                            description={`Refresh token: ${config.tokens?.refreshTokenDays || 7} days`} tag="live" />
-                        {expanded === 'tokens' && (
-                            <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <ConfigNumber label="Refresh Token Lifetime (days)" value={config.tokens.refreshTokenDays} onChange={(v) => update('tokens', 'refreshTokenDays', v)} fallback={7} />
-                                </div>
-                                <SaveButton saving={saving === 'tokens'} onClick={() => saveSection('tokens', config.tokens, 'tokens')} />
                             </div>
                         )}
                     </div>
@@ -929,9 +880,9 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                     <ConfigToggle label="Enabled" checked={config.autoRenewal?.enabled ?? false} onChange={(v) => update('autoRenewal', 'enabled', v)} />
                                     <ConfigNumber label="Renew Days Before Expiry" value={config.autoRenewal?.renewDaysBeforeExpiry} onChange={(v) => update('autoRenewal', 'renewDaysBeforeExpiry', v)} fallback={0} />
                                     <ConfigToggle label="Auto Approve" checked={config.autoRenewal?.autoApprove ?? false} onChange={(v) => update('autoRenewal', 'autoApprove', v)} />
-                                    <ConfigInput label="Schedule (cron)" value={config.autoRenewal?.schedule} onChange={(v) => update('autoRenewal', 'schedule', v)} placeholder="0 2 * * *" />
                                 </div>
-                                <SaveButton saving={saving === 'autoRenewal'} onClick={() => saveSection('auto-renewal', config.autoRenewal, 'autoRenewal')} />
+                                <ScheduleMovedNote />
+                                <SaveButton saving={saving === 'autoRenewal'} onClick={() => saveSection('auto-renewal', { ...config.autoRenewal, schedule: '' }, 'autoRenewal')} />
                             </div>
                         )}
                     </div>
@@ -945,9 +896,9 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                     <ConfigToggle label="Enabled" checked={config.certExpiryNotification?.enabled ?? false} onChange={(v) => update('certExpiryNotification', 'enabled', v)} />
                                     <ConfigInput label="Warning Days (comma-separated)" value={config.certExpiryNotification?.warningDays} onChange={(v) => update('certExpiryNotification', 'warningDays', v)} placeholder="90,60,30,14,7" />
-                                    <ConfigInput label="Schedule (cron)" value={config.certExpiryNotification?.schedule} onChange={(v) => update('certExpiryNotification', 'schedule', v)} placeholder="0 8 * * *" />
                                 </div>
-                                <SaveButton saving={saving === 'certExpiryNotification'} onClick={() => saveSection('cert-expiry-notifications', config.certExpiryNotification, 'certExpiryNotification')} />
+                                <ScheduleMovedNote />
+                                <SaveButton saving={saving === 'certExpiryNotification'} onClick={() => saveSection('cert-expiry-notifications', { ...config.certExpiryNotification, schedule: '' }, 'certExpiryNotification')} />
                             </div>
                         )}
                     </div>
@@ -958,16 +909,29 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                             description={config.certVulnerabilityScan?.enabled ? `Min RSA ${config.certVulnerabilityScan.minRsaKeySize || 2048}` : 'Disabled'} tag="live" />
                         {expanded === 'certVulnerabilityScan' && (
                             <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
+                                <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 rounded p-3 text-xs text-blue-800 dark:text-blue-300">
+                                    These thresholds <strong>flag existing certificates</strong> in the inventory. Issuance is enforced
+                                    separately by <strong>Certificate Policy</strong> above{config.certPolicy?.enabled ? '' : ' (currently disabled)'}.
+                                    Keep the two aligned to avoid surprises — the active policy baseline is shown beneath each field.
+                                </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                     <ConfigToggle label="Enabled" checked={config.certVulnerabilityScan?.enabled ?? false} onChange={(v) => update('certVulnerabilityScan', 'enabled', v)} />
-                                    <ConfigNumber label="Min RSA Key Size" value={config.certVulnerabilityScan?.minRsaKeySize} onChange={(v) => update('certVulnerabilityScan', 'minRsaKeySize', v)} fallback={0} />
-                                    <ConfigNumber label="Warn Over Validity Days" value={config.certVulnerabilityScan?.warnOverValidityDays} onChange={(v) => update('certVulnerabilityScan', 'warnOverValidityDays', v)} fallback={0} />
-                                    <ConfigInput label="Schedule (cron)" value={config.certVulnerabilityScan?.schedule} onChange={(v) => update('certVulnerabilityScan', 'schedule', v)} placeholder="0 3 * * 0" />
+                                    <div />
+                                    <div>
+                                        <ConfigNumber label="Min RSA Key Size" value={config.certVulnerabilityScan?.minRsaKeySize} onChange={(v) => update('certVulnerabilityScan', 'minRsaKeySize', v)} fallback={0} />
+                                        <p className="text-[10px] text-gray-600 mt-1">Policy: {config.certPolicy?.enabled ? `blocks issuance below ${config.certPolicy?.minRsaKeySize || 'unset'}` : 'enforcement off'}</p>
+                                    </div>
+                                    <div>
+                                        <ConfigNumber label="Warn Over Validity Days" value={config.certVulnerabilityScan?.warnOverValidityDays} onChange={(v) => update('certVulnerabilityScan', 'warnOverValidityDays', v)} fallback={0} />
+                                        <p className="text-[10px] text-gray-600 mt-1">Policy: {config.certPolicy?.enabled ? `caps validity at ${config.certPolicy?.maxValidityDays || 'unset'}d` : 'enforcement off'}</p>
+                                    </div>
                                     <div className="md:col-span-2">
                                         <ConfigInput label="Deprecated Algorithms (comma-separated)" value={listToStr(config.certVulnerabilityScan?.deprecatedAlgorithms)} onChange={(v) => update('certVulnerabilityScan', 'deprecatedAlgorithms', strToList(v))} placeholder="MD5, SHA1, RSA-1024" />
+                                        <p className="text-[10px] text-gray-600 mt-1">Policy forbids at issuance: {listToStr(config.certPolicy?.forbiddenAlgorithms) || 'none'}</p>
                                     </div>
                                 </div>
-                                <SaveButton saving={saving === 'certVulnerabilityScan'} onClick={() => saveSection('vulnerability-scan', config.certVulnerabilityScan, 'certVulnerabilityScan')} />
+                                <ScheduleMovedNote />
+                                <SaveButton saving={saving === 'certVulnerabilityScan'} onClick={() => saveSection('vulnerability-scan', { ...config.certVulnerabilityScan, schedule: '' }, 'certVulnerabilityScan')} />
                             </div>
                         )}
                     </div>
@@ -1209,30 +1173,6 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                         )}
                     </div>
 
-                    {/* Scheduler */}
-                    <div className={cardClass}>
-                        <SectionHeader title="Scheduler" expanded={expanded === 'scheduler'} onToggle={() => toggle('scheduler')}
-                            description={`${config.scheduler?.enabled !== false ? 'Enabled' : 'Disabled'}, poll every ${config.scheduler?.pollIntervalSeconds || 30}s`} tag="live" />
-                        {expanded === 'scheduler' && (
-                            <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <ConfigToggle label="Enabled" checked={config.scheduler?.enabled !== false} onChange={(v) => update('scheduler', 'enabled', v)} />
-                                    <ConfigNumber label="Poll Interval (seconds)" value={config.scheduler.pollIntervalSeconds} onChange={(v) => update('scheduler', 'pollIntervalSeconds', v)} />
-                                    <ConfigNumber label="Lease TTL (seconds)" value={config.scheduler.leaseTtlSeconds} onChange={(v) => update('scheduler', 'leaseTtlSeconds', v)} />
-                                    <ConfigNumber label="Default Job Timeout (seconds)" value={config.scheduler.defaultJobTimeoutSeconds} onChange={(v) => update('scheduler', 'defaultJobTimeoutSeconds', v)} />
-                                    <ConfigNumber label="Failure Alert Threshold" value={config.scheduler.consecutiveFailureAlertThreshold} onChange={(v) => update('scheduler', 'consecutiveFailureAlertThreshold', v)} />
-                                    <div>
-                                        <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Missed Run Policy</label>
-                                        <select value={config.scheduler.missedRunPolicy || 'RunOnce'} onChange={(e) => update('scheduler', 'missedRunPolicy', e.target.value)} className={inputClass}>
-                                            <option value="RunOnce">Run Once (catch up)</option>
-                                            <option value="Skip">Skip (wait for next)</option>
-                                        </select>
-                                    </div>
-                                </div>
-                                <SaveButton saving={saving === 'scheduler'} onClick={() => saveSection('scheduler', config.scheduler, 'scheduler')} />
-                            </div>
-                        )}
-                    </div>
                 </>
             )}
         </div>
@@ -1273,6 +1213,10 @@ const FeatureFlagsTab: React.FC = () => {
             <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
                 <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Feature Flags</h3>
             </div>
+            <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700 bg-blue-50 dark:bg-blue-900/20 text-xs text-blue-800 dark:text-blue-300">
+                Changes here apply <strong>live</strong> — toggling a feature takes effect immediately, no restart required.
+                Items marked <RestartTag /> need a service restart before the change takes effect.
+            </div>
             {features.length === 0 && (
                 <div className="p-4 text-sm text-gray-600 text-center">No feature flags configured</div>
             )}
@@ -1281,7 +1225,7 @@ const FeatureFlagsTab: React.FC = () => {
                     <div className="flex items-center gap-2">
                         <span className="text-sm text-gray-900 dark:text-white">{f.name}</span>
                         {f.description && <span className="text-xs text-gray-600">{f.description}</span>}
-                        {f.requiresRestart ? <RestartTag /> : <LiveTag />}
+                        {f.requiresRestart && <RestartTag />}
                     </div>
                     <button
                         onClick={() => handleToggle(f)}

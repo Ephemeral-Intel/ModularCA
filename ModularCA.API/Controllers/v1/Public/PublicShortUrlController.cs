@@ -69,7 +69,9 @@ public class PublicShortUrlController(
 
         var raw = await certStore.GetRawCertificateAsync(serial);
         if (raw == null || raw.Length == 0) return NotFound();
-        return File(raw, "application/pkix-cert", $"{safeName}.crt");
+        // DER certs use .cer (Windows-recognized) to match the other download
+        // endpoints; .crt is avoided for DER since it conventionally implies PEM.
+        return File(raw, "application/pkix-cert", $"{safeName}.cer");
     }
 
     /// <summary>GET /crl/{serialOrLabel} — Download full CRL by serial number or CA label. Returns DER (.crl) by default, PEM (.pem) if Accept header requests it.

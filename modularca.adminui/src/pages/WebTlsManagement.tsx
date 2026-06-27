@@ -19,6 +19,7 @@ interface WebTlsCertStatusResponse {
     signingProfileId: string | null;
     signingProfileName: string | null;
     keyAlgorithm: string | null;
+    keySize: string | null;
 }
 
 interface ReissueFormState {

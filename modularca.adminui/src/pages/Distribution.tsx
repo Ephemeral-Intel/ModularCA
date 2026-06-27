@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { apiGet, apiPost, apiPut, apiDelete, API_BASE } from '../api/client';
 import { useToast } from '../context/ToastContext';
+import { useAuth } from '../context/AuthContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
 import ConfirmModal from '../components/ConfirmModal';
+import { LdapPublisherManager } from './LdapPublishers';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -339,15 +342,181 @@ const CurrentCrlsSection: React.FC = () => {
     );
 };
 
-/* ─── CRL Management Page ─── */
-const CrlManagement: React.FC = () => {
+/* ─── LDAP Tab — CA selector + per-CA publisher manager (admin only) ─── */
+const LdapTab: React.FC<{ initialCaId?: string }> = ({ initialCaId }) => {
+    const [cas, setCas] = useState<any[]>([]);
+    const [selectedCa, setSelectedCa] = useState<string>(initialCaId || '');
+
+    useEffect(() => {
+        apiGet<any>('/api/v1/admin/authorities')
+            .then((data) => {
+                const list = Array.isArray(data) ? data : (data.items || data.authorities || []);
+                setCas(list);
+                // Default to the deep-linked CA, else the first CA so the manager has a target.
+                setSelectedCa((cur) => cur || (list[0] ? (list[0].id || list[0].caId) : ''));
+            })
+            .catch(() => {});
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     return (
-        <div className="p-6 space-y-8">
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">CRL Management</h1>
-            <CrlSchedulesSection />
-            <CurrentCrlsSection />
+        <div className="space-y-4">
+            <div className="flex items-center gap-3 flex-wrap">
+                <label className="text-sm text-gray-700 dark:text-gray-300">Certificate Authority</label>
+                <select value={selectedCa} onChange={(e) => setSelectedCa(e.target.value)}
+                    className="px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white focus:outline-none focus:border-blue-500 min-w-[240px]">
+                    <option value="">Select CA...</option>
+                    {cas.map((ca) => (
+                        <option key={ca.id || ca.caId} value={ca.id || ca.caId}>{ca.name || ca.subjectDN}</option>
+                    ))}
+                </select>
+            </div>
+            {selectedCa
+                ? <LdapPublisherManager caId={selectedCa} />
+                : <div className="text-sm text-gray-600 dark:text-gray-400">Select a CA to manage its LDAP publishers.</div>}
         </div>
     );
 };
 
-export default CrlManagement;
+/* ─── Service URLs Tab — per-CA public base URL → CDP/OCSP/AIA (admin only) ─── */
+interface ServiceUrlRow { caCertId: string; name: string; label: string; publicBaseUrl: string }
+
+const ServiceUrlsTab: React.FC = () => {
+    const { showToast } = useToast();
+    const [rows, setRows] = useState<ServiceUrlRow[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState<string | null>(null);
+
+    const flatten = (list: any[]): any[] => {
+        const out: any[] = [];
+        for (const ca of list) { out.push(ca); if (ca.children?.length) out.push(...flatten(ca.children)); }
+        return out;
+    };
+
+    useEffect(() => {
+        Promise.all([
+            apiGet<any>('/api/v1/admin/authorities/hierarchy').catch(() => []),
+            apiGet<any>('/api/v1/admin/ca-service-urls').catch(() => []),
+        ]).then(([h, su]) => {
+            const flat = flatten(Array.isArray(h) ? h : (h.items || h.authorities || []));
+            const list = Array.isArray(su) ? su : (su.items || []);
+            const byKey: Record<string, string> = {};
+            for (const s of list) { const k = s.caCertificateId || s.caId; if (k) byKey[k] = s.publicBaseUrl || ''; }
+            const next = flat
+                .map((ca: any): ServiceUrlRow | null => {
+                    const caCertId = ca.certificateId || ca.certificate?.certificateId;
+                    if (!caCertId) return null;
+                    return {
+                        caCertId,
+                        name: ca.label || ca.name || ca.subjectDN || caCertId,
+                        label: ca.label || ca.serialNumber || ca.certificate?.serialNumber || '',
+                        publicBaseUrl: byKey[caCertId] ?? (ca.serviceUrls?.publicBaseUrl || ''),
+                    };
+                })
+                .filter((r): r is ServiceUrlRow => r !== null);
+            setRows(next);
+        }).finally(() => setLoading(false));
+    }, []);
+
+    const update = (caCertId: string, value: string) =>
+        setRows((prev) => prev.map((r) => (r.caCertId === caCertId ? { ...r, publicBaseUrl: value } : r)));
+
+    const save = async (row: ServiceUrlRow) => {
+        setSaving(row.caCertId);
+        try {
+            await apiPut(`/api/v1/admin/ca-service-urls/${row.caCertId}`, { publicBaseUrl: row.publicBaseUrl || null });
+            showToast('success', 'Public base URL saved');
+        } catch (err: any) {
+            showToast('error', err.message || 'Failed to save public base URL');
+        } finally {
+            setSaving(null);
+        }
+    };
+
+    return (
+        <div className="space-y-4">
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 rounded-lg p-3 text-xs text-blue-800 dark:text-blue-300">
+                The public base URL drives the <strong>CDP, OCSP, and AIA</strong> endpoints embedded in every certificate a CA
+                issues — the program appends <code className="mono">/crl/{'{label}'}</code>, <code className="mono">/ocsp</code>,
+                and <code className="mono">/ca/{'{label}'}</code> at issue time. Use plain <strong>HTTP</strong> so relying parties
+                can fetch CRLs/OCSP without a TLS chicken-and-egg. Leave empty to issue without CDP/AIA extensions.
+            </div>
+            {loading && <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>}
+            {!loading && rows.length === 0 && <div className="text-sm text-gray-600 dark:text-gray-400">No certificate authorities found.</div>}
+            {rows.map((row) => (
+                <div key={row.caCertId} className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-4 space-y-3">
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{row.name}</h3>
+                    <div>
+                        <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Public Base URL</label>
+                        <input type="text" value={row.publicBaseUrl} onChange={(e) => update(row.caCertId, e.target.value)}
+                            placeholder="http://path2.ca.example.com"
+                            className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
+                    </div>
+                    {row.publicBaseUrl && (
+                        <div className="text-xs text-gray-600 dark:text-gray-400 space-y-0.5">
+                            <div>CDP: <span className="font-mono">{row.publicBaseUrl}/crl/{row.label}</span></div>
+                            <div>OCSP: <span className="font-mono">{row.publicBaseUrl}/ocsp</span></div>
+                            <div>CA Issuer: <span className="font-mono">{row.publicBaseUrl}/ca/{row.label}</span></div>
+                        </div>
+                    )}
+                    <button onClick={() => save(row)} disabled={saving === row.caCertId}
+                        className="px-4 py-1.5 text-xs font-semibold bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-40 transition-colors">
+                        {saving === row.caCertId ? 'Saving...' : 'Save'}
+                    </button>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+/* ─── CA Distribution Page ─── */
+const Distribution: React.FC = () => {
+    const { hasAnyRole } = useAuth();
+    const isAdmin = hasAnyRole(['Administrator']);
+    const [searchParams, setSearchParams] = useSearchParams();
+    const caIdParam = searchParams.get('caId') || undefined;
+    type Tab = 'crl' | 'ldap' | 'serviceurls';
+    const requestedTab = searchParams.get('tab');
+    const [tab, setTab] = useState<Tab>(
+        (requestedTab === 'ldap' || requestedTab === 'serviceurls') && isAdmin ? requestedTab : 'crl');
+
+    const selectTab = (t: Tab) => {
+        setTab(t);
+        const next = new URLSearchParams(searchParams);
+        next.set('tab', t);
+        setSearchParams(next, { replace: true });
+    };
+
+    const tabs: { key: Tab; label: string }[] = [
+        { key: 'crl', label: 'CRL' },
+        ...(isAdmin ? [{ key: 'ldap' as const, label: 'LDAP' }, { key: 'serviceurls' as const, label: 'Service URLs' }] : []),
+    ];
+
+    return (
+        <div className="p-3 sm:p-6 space-y-6">
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">CA Distribution</h1>
+
+            <div className="flex gap-1 border-b border-gray-300 dark:border-gray-700">
+                {tabs.map((t) => (
+                    <button key={t.key} onClick={() => selectTab(t.key)}
+                        className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 ${tab === t.key
+                            ? 'text-blue-800 dark:text-blue-400 border-blue-400'
+                            : 'text-gray-600 dark:text-gray-400 border-transparent hover:text-gray-700 dark:hover:text-gray-300'}`}>
+                        {t.label}
+                    </button>
+                ))}
+            </div>
+
+            {tab === 'crl' && (
+                <div className="space-y-8">
+                    <CrlSchedulesSection />
+                    <CurrentCrlsSection />
+                </div>
+            )}
+            {tab === 'ldap' && isAdmin && <LdapTab initialCaId={caIdParam} />}
+            {tab === 'serviceurls' && isAdmin && <ServiceUrlsTab />}
+        </div>
+    );
+};
+
+export default Distribution;

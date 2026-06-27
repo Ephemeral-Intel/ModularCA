@@ -1,4 +1,5 @@
 import React from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 export interface OrganizationData {
     orgName: string;
@@ -11,6 +12,7 @@ interface OrganizationProps {
 }
 
 const Organization: React.FC<OrganizationProps> = ({ data, onChange }) => {
+    const autoFocusRef = useAutoFocus<HTMLInputElement>();
     return (
         <div className="space-y-6">
             <div>
@@ -26,6 +28,7 @@ const Organization: React.FC<OrganizationProps> = ({ data, onChange }) => {
                         Organization Name <span className="text-red-500">*</span>
                     </label>
                     <input
+                        ref={autoFocusRef}
                         id="orgName"
                         type="text"
                         required

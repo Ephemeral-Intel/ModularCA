@@ -6,6 +6,7 @@ using Microsoft.Extensions.Caching.Distributed;
 using ModularCA.API.Controllers.v1.Auth;
 using ModularCA.API.Middleware;
 using ModularCA.API.Validation.Users;
+using ModularCA.Auth.Authorization;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Core.Services;
 using ModularCA.Database;
@@ -30,10 +31,12 @@ namespace ModularCA.API.Controllers.v1.Admin.Management
         IDistributedCache cache,
         ISecurityAlertService alertService,
         IValidator<CreateUserRequest> createValidator,
-        IValidator<UpdateUserRequest> updateValidator) : ControllerBase
+        IValidator<UpdateUserRequest> updateValidator,
+        IControlledUserCeremonyService controlledUserSvc) : ControllerBase
     {
         private readonly ModularCADbContext _dbContext = dbContext;
         private readonly IUserManagementService _userService = userService;
+        private readonly IControlledUserCeremonyService _controlledUserSvc = controlledUserSvc;
         private readonly ICurrentUserService _currentUser = currentUser;
         private readonly IAuditService _audit = auditService;
         private readonly IDistributedCache _cache = cache;
@@ -168,6 +171,38 @@ namespace ModularCA.API.Controllers.v1.Admin.Management
 
             if (_currentUser.User?.Id == id)
                 return BadRequest(new { error = "You cannot delete your own account" });
+
+            // Controlled-user gate: deleting a user who holds a controlled tier (admin/CA-admin)
+            // requires a ceremony for non-super, with the last-controlled-user guard.
+            var delTier = await _controlledUserSvc.GetDeletionTierAsync(id);
+            if (delTier != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User!.Id))
+            {
+                if (await _controlledUserSvc.CountDominatingControlledUsersAsync(delTier.Value, id) == 0)
+                    return BadRequest(new { error = "Refusing to delete the last controlled user of this scope." });
+                if (!await _controlledUserSvc.CanInitiateAsync(_currentUser.User.Id, delTier.Value))
+                    return StatusCode(403, new { error = "You cannot delete a user above your own tier." });
+
+                var targetUsername = (await _userService.GetUserById(id))?.Username;
+                var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                    new ModularCA.Shared.Models.ControlledUserChangeParameters
+                    {
+                        ChangeType = "DeleteUser",
+                        TargetUserId = id,
+                        TargetUsername = targetUsername,
+                    },
+                    delTier.Value,
+                    _currentUser.User!.Id,
+                    _currentUser.User!.Username ?? string.Empty);
+
+                return Accepted(new
+                {
+                    ceremonyId,
+                    requiresCeremony = true,
+                    message = "Deleting this controlled user requires a controlled-user ceremony. "
+                              + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+                });
+            }
+
             if (await _userService.DeleteUser(id))
             {
                 await _audit.LogAsync(AuditActionType.UserDeleted, _currentUser.User?.Id, _currentUser.User?.Username,
@@ -339,6 +374,32 @@ namespace ModularCA.API.Controllers.v1.Admin.Management
             var tierCheck = await AuthorizeUserGroupChangeAsync(groupId, id);
             if (tierCheck != null) return tierCheck;
 
+            // Controlled-user gate: adding to a privilege-controlled group promotes a controlled
+            // user — a non-super routes it through a ceremony (mirrors AdminGroupController.AddMember).
+            var addGroup = await _dbContext.CaGroups.FindAsync(groupId);
+            var addTier = addGroup != null ? _controlledUserSvc.ClassifyGroup(addGroup) : null;
+            if (addTier != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User!.Id))
+            {
+                var targetUsername = (await _dbContext.Users.FindAsync(id))?.Username;
+                var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                    new ModularCA.Shared.Models.ControlledUserChangeParameters
+                    {
+                        ChangeType = "AddGroupMember",
+                        TargetUserId = id,
+                        TargetUsername = targetUsername,
+                        GroupId = groupId,
+                        CertificateAuthorityId = addGroup!.CertificateAuthorityId,
+                    },
+                    addTier.Value, _currentUser.User!.Id, _currentUser.User!.Username ?? string.Empty);
+                return Accepted(new
+                {
+                    ceremonyId,
+                    requiresCeremony = true,
+                    message = "Adding this member promotes a controlled user and requires a controlled-user ceremony. "
+                              + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+                });
+            }
+
             if (await _userService.AddUserToGroup(id, groupId, _currentUser.User?.Id))
             {
                 // Group change rotates stamp — drop the cached entry.
@@ -366,6 +427,33 @@ namespace ModularCA.API.Controllers.v1.Admin.Management
 
             var tierCheck = await AuthorizeUserGroupChangeAsync(groupId, id);
             if (tierCheck != null) return tierCheck;
+
+            // Controlled-user gate: removing from a privilege-controlled group demotes a controlled
+            // user — non-super routes it through a ceremony, with the last-controlled-user guard.
+            var remGroup = await _dbContext.CaGroups.FindAsync(groupId);
+            var remTier = remGroup != null ? _controlledUserSvc.ClassifyGroup(remGroup) : null;
+            if (remTier != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User!.Id))
+            {
+                if (await _controlledUserSvc.CountDominatingControlledUsersAsync(remTier.Value, id) == 0)
+                    return BadRequest(new { error = "Refusing to remove the last controlled user of this scope." });
+
+                var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                    new ModularCA.Shared.Models.ControlledUserChangeParameters
+                    {
+                        ChangeType = "RemoveGroupMember",
+                        TargetUserId = id,
+                        GroupId = groupId,
+                        CertificateAuthorityId = remGroup!.CertificateAuthorityId,
+                    },
+                    remTier.Value, _currentUser.User!.Id, _currentUser.User!.Username ?? string.Empty);
+                return Accepted(new
+                {
+                    ceremonyId,
+                    requiresCeremony = true,
+                    message = "Removing this member demotes a controlled user and requires a controlled-user ceremony. "
+                              + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+                });
+            }
 
             if (await _userService.RemoveUserFromGroup(id, groupId))
             {

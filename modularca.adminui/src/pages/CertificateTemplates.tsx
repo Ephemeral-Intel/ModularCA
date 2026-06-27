@@ -258,7 +258,7 @@ const X509TemplatesTab: React.FC = () => {
                         <div className="flex items-center justify-between p-4 border-b border-gray-300 dark:border-gray-700">
                             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{selectedTemplate.name}</h3>
                             <button onClick={() => setSelectedTemplate(null)}
-                                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white text-xl px-2">X</button>
+                                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white text-xl px-2">X</button>
                         </div>
                         <div className="p-4 space-y-3">
                             <DetailField label="ID" value={selectedTemplate.id} />
@@ -535,7 +535,7 @@ const SshTemplatesTab: React.FC = () => {
                         <div className="flex items-center justify-between p-4 border-b border-gray-300 dark:border-gray-700">
                             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{selectedTemplate.name}</h3>
                             <button onClick={() => setSelectedTemplate(null)}
-                                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white text-xl px-2">X</button>
+                                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white text-xl px-2">X</button>
                         </div>
                         <div className="p-4 space-y-3">
                             <DetailField label="ID" value={selectedTemplate.id} />
@@ -588,6 +588,19 @@ const SshTemplatesTab: React.FC = () => {
 };
 
 /* ─── Certificate Templates Page ─── */
+//
+// INTERNAL NOTE — NOT WIRED INTO ISSUANCE (hidden from navigation as of 2026-06).
+// Templates are CRUD-only: no enrollment/ACME/SCEP/EST/CMP/SSH issuance path reads a template.
+// The backend resolver CaResolverService.ResolveByTemplateAsync(templateName) exists but has no
+// caller, and no issuance request accepts a templateId. This page is intentionally kept (reachable
+// by direct URL at /templates) but removed from the sidebar so operators aren't misled into
+// thinking a template governs issuance.
+//
+// RE-IMPLEMENT plan: add an optional templateId to the enrollment/issuance request paths (or have
+// CaProtocolConfig reference a template), call ResolveByTemplateAsync to expand it into the
+// CA + cert/signing/request profiles, then restore the nav entry in Layout.tsx. Until then the
+// banner below tells anyone who lands here that changes have no effect.
+//
 const CertificateTemplates: React.FC = () => {
     const [activeTab, setActiveTab] = useState<TemplateTab>('X.509 CA');
 
@@ -597,6 +610,14 @@ const CertificateTemplates: React.FC = () => {
             <p className="text-sm text-gray-600 dark:text-gray-400">
                 Manage certificate templates that combine a CA, profiles, and settings into a reusable configuration.
             </p>
+
+            {/* Hidden-from-nav notice: templates are not yet consumed by any issuance path. */}
+            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700/60 rounded-lg p-4 text-sm text-amber-800 dark:text-amber-300">
+                <span className="font-semibold">Not yet active.</span> Certificate templates are not currently
+                consumed by any issuance or enrollment flow — creating or editing one has no effect on how
+                certificates are issued. This page is hidden from the navigation pending re-implementation that
+                wires templates into the issuance pipeline.
+            </div>
 
             <div className="flex gap-1 border-b border-gray-300 dark:border-gray-700">
                 {TEMPLATE_TABS.map((tab) => (

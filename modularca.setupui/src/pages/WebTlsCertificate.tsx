@@ -1,4 +1,5 @@
 import React from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 export type TlsKeyAlgorithm = 'ECDSA' | 'RSA' | 'Ed25519' | 'ML-DSA' | 'SLH-DSA';
 
@@ -27,6 +28,7 @@ interface WebTlsCertificateProps {
 /// management UI TLS certificate issued at the end of bootstrap.
 /// </summary>
 const WebTlsCertificate: React.FC<WebTlsCertificateProps> = ({ data, onChange, onResetFromNetwork }) => {
+    const autoFocusRef = useAutoFocus<HTMLInputElement>();
     // Local raw-text state so the textarea preserves blank lines, trailing whitespace, and
     // mid-edit cursor position. Parsing into `data.sans` only happens on blur, when we trim
     // each line and drop empty entries. Re-sync from the parent when `data.sans` changes by an
@@ -90,6 +92,7 @@ const WebTlsCertificate: React.FC<WebTlsCertificateProps> = ({ data, onChange, o
                         Common Name <span className="text-red-500">*</span>
                     </label>
                     <input
+                        ref={autoFocusRef}
                         id="webTlsCommonName"
                         type="text"
                         required

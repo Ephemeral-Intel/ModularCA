@@ -24,4 +24,12 @@ public enum CeremonyType
 
     /// <summary>Ceremonies that mutate tenant security policy (ceremony-requirement fields).</summary>
     TenantPolicyChange = 1,
+
+    /// <summary>
+    /// Ceremonies that change a <i>controlled user</i>'s privileges — promote (grant),
+    /// demote (revoke), or delete a user holding an admin/operator/CA-admin tier. Initiated
+    /// by any non-super actor; approved by a quorum that dominates the affected tier. The
+    /// approval threshold comes from the <i>user quorum</i> (distinct from the CA/key quorum).
+    /// </summary>
+    ControlledUserChange = 2,
 }

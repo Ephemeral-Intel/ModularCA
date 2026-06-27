@@ -50,6 +50,107 @@ public class AdminQuotaController(
     }
 
     /// <summary>
+    /// Returns all tenants with their certificate authorities and each CA's certificate-issuance
+    /// quota nested underneath, for the combined Tenants &amp; Quotas view. Includes tenant-level
+    /// ceilings (max CAs / certs / users) and per-CA issued/pending usage so limits can be read as
+    /// they cascade tenant → CA. Gated to SystemAdmin (tenant configuration is admin-only).
+    /// </summary>
+    [HttpGet("by-tenant")]
+    [Authorize(Policy = "SystemAdmin")]
+    public async Task<IActionResult> GetQuotasByTenant()
+    {
+        // Per-CA quota usage (issued/pending computed live), keyed by CaId. Only enabled CAs appear
+        // in the summary, so disabled CAs nest with a null quota below.
+        var summary = await quotaService.GetUsageSummaryAsync();
+        var quotaByCa = summary.CaQuotas.ToDictionary(q => q.CaId);
+
+        var tenants = await db.Tenants
+            .AsNoTracking()
+            .OrderBy(t => t.Name)
+            .ToListAsync();
+        var tenantIds = tenants.Select(t => t.Id).ToList();
+
+        // CAs per tenant (exclude soft-deleted), grouped for nesting.
+        var cas = await db.CertificateAuthorities
+            .AsNoTracking()
+            .Where(ca => tenantIds.Contains(ca.TenantId) && !ca.IsDeleted)
+            .Select(ca => new { ca.Id, ca.TenantId, ca.Name, ca.Label, ca.Type, ca.IsEnabled, ca.IsSshCa })
+            .ToListAsync();
+        var casByTenant = cas.GroupBy(c => c.TenantId).ToDictionary(g => g.Key, g => g.ToList());
+
+        // Distinct user counts per tenant (via group memberships) — same source as the tenant list.
+        var userCounts = await db.CaGroupMembers
+            .Where(gm => tenantIds.Contains(gm.Group.TenantId))
+            .GroupBy(gm => gm.Group.TenantId)
+            .Select(g => new { TenantId = g.Key, Count = g.Select(gm => gm.UserId).Distinct().Count() })
+            .ToDictionaryAsync(x => x.TenantId, x => x.Count);
+
+        var tenantDtos = tenants.Select(t =>
+        {
+            var tenantCas = casByTenant.GetValueOrDefault(t.Id, new());
+            var caDtos = tenantCas.Select(ca =>
+            {
+                var q = quotaByCa.GetValueOrDefault(ca.Id);
+                return new
+                {
+                    ca.Id,
+                    ca.Name,
+                    ca.Label,
+                    ca.Type,
+                    ca.IsEnabled,
+                    ca.IsSshCa,
+                    Quota = q == null ? null : new
+                    {
+                        groupId = q.GroupId,
+                        maxCertificates = q.MaxCertificates,
+                        maxPendingRequests = q.MaxPendingRequests,
+                        issuedCount = q.IssuedCount,
+                        pendingCount = q.PendingCount,
+                        remainingCount = q.RemainingCount,
+                        usagePercent = q.UsagePercent,
+                        isExceeded = q.IsExceeded
+                    }
+                };
+            }).ToList();
+
+            // Tenant-level active certs across its CAs — pairs with MaxCertificatesTotal for context.
+            var tenantIssued = tenantCas.Sum(ca => quotaByCa.GetValueOrDefault(ca.Id)?.IssuedCount ?? 0);
+
+            return new
+            {
+                t.Id,
+                t.Name,
+                t.Slug,
+                t.Description,
+                t.IsEnabled,
+                t.IsSystemTenant,
+                t.CreatedAt,
+                t.MaxCertificateAuthorities,
+                t.MaxCertificatesTotal,
+                t.MaxUsers,
+                t.RequireKeyCeremony,
+                t.CeremonyRequiredApprovals,
+                CaCount = tenantCas.Count,
+                UserCount = userCounts.GetValueOrDefault(t.Id, 0),
+                IssuedCertificates = tenantIssued,
+                CertificateAuthorities = caDtos
+            };
+        }).ToList();
+
+        return Ok(new
+        {
+            tenants = tenantDtos,
+            totals = new
+            {
+                totalTenants = tenantDtos.Count,
+                totalCAs = summary.CaQuotas.Count,
+                casAtLimit = summary.ExceededCount,
+                casNearLimit = summary.WarningCount
+            }
+        });
+    }
+
+    /// <summary>
     /// Returns detailed quota status for a single CA identified by its ID.
     /// </summary>
     /// <param name="caId">The certificate authority ID.</param>

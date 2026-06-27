@@ -104,6 +104,10 @@ public class AdminSecurityPolicyController(
         if (request.MaxSingleRequestsPerRequest is int mspr && mspr >= 1)
             policy.MaxSingleRequestsPerRequest = mspr;
 
+        // Controlled-user ceremonies (user quorum) — minimum 1 (initiator always excluded).
+        if (request.UserQuorum is int uq && uq >= 1)
+            policy.UserQuorum = uq;
+
         // Keystore scrypt cost — clamp at write time so the DB never holds an unreasonable value.
         if (request.KeystoreScryptN is int ksn)
             policy.KeystoreScryptN = Math.Clamp(ksn, 1 << 14, 1 << 20);
@@ -157,6 +161,8 @@ public class SecurityPolicyUpdateRequest
     public int? DefaultGoodResponseTtlMinutes { get; set; }
     public int? DefaultRevokedResponseTtlMinutes { get; set; }
     public int? MaxSingleRequestsPerRequest { get; set; }
+    /// <summary>User quorum for controlled-user ceremonies (promote/demote/delete). Min 1.</summary>
+    public int? UserQuorum { get; set; }
     // Keystore KDF cost — raise as hardware improves; existing files re-stamp on append.
     public int? KeystoreScryptN { get; set; }
     public int? KeystoreScryptR { get; set; }

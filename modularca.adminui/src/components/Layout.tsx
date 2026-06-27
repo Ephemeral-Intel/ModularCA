@@ -43,9 +43,7 @@ const navSections: NavSection[] = [
             { name: 'All Certificates', path: '/certificates', icon: '\u2387' },
             { name: 'Request Certificate', path: '/certificates/request', icon: '+' },
             { name: 'Pending Requests', path: '/certificates/requests', icon: '\u2709' },
-            { name: 'Search', path: '/certificates/search', icon: '\u2315' },
             { name: 'Cert Inventory', path: '/intel/inventory', icon: '\u2690' },
-            { name: 'Vulnerabilities', path: '/intel/vulnerabilities', icon: '\u26A0', requiredRoles: ADMIN_OPERATOR },
             { name: 'Compliance', path: '/intel/compliance', icon: '\u2611', requiredRoles: ADMIN_OPERATOR },
             { name: 'Expiry Calendar', path: '/certificates/expiry', icon: '\u2612' },
         ]
@@ -55,10 +53,17 @@ const navSections: NavSection[] = [
         items: [
             { name: 'Authorities', path: '/authorities/manage', icon: '\u26BF', requiredRoles: ADMIN_ONLY },
             { name: 'Profiles', path: '/profiles', icon: '\u2630', requiredRoles: ADMIN_OPERATOR },
-            { name: 'Templates', path: '/templates', icon: '\u2702', requiredRoles: ADMIN_OPERATOR },
-            { name: 'CRL Management', path: '/crl', icon: '\u2716', requiredRoles: ADMIN_OPERATOR },
+            // TEMPLATES HIDDEN \u2014 Certificate templates are CRUD-only and not consumed by any
+            // issuance path (no enrollment/ACME/SCEP/EST/CMP/SSH flow reads a template; the
+            // CaResolverService.ResolveByTemplateAsync resolver exists but has no caller). Removed
+            // from navigation so operators aren't misled into thinking templates govern issuance.
+            // The /templates route is still registered in App.tsx and reachable by direct URL.
+            // RE-IMPLEMENT: wire templates into issuance (add an optional templateId to the
+            // enrollment/issuance request paths and call ResolveByTemplateAsync) before restoring
+            // this nav entry. See also the banner in CertificateTemplates.tsx.
+            // { name: 'Templates', path: '/templates', icon: '\u2702', requiredRoles: ADMIN_OPERATOR },
+            { name: 'CA Distribution', path: '/distribution', icon: '\u2716', requiredRoles: ADMIN_OPERATOR },
             { name: 'Trust Anchors', path: '/trust-anchors', icon: '\u2693', requiredRoles: ADMIN_ONLY },
-            { name: 'Key Ceremonies', path: '/ceremonies', icon: '\u2638', requiredRoles: ADMIN_ONLY },
             { name: 'SSH CA', path: '/ssh', icon: '\u2318' },
             { name: 'Protocol Config', path: '/authorities/protocols', icon: '\u21C4', requiredRoles: ADMIN_ONLY },
         ]
@@ -76,11 +81,15 @@ const navSections: NavSection[] = [
     {
         title: 'Administration',
         items: [
-            { name: 'Tenants', path: '/tenants', icon: '\u2616', requiredRoles: ADMIN_ONLY },
+            // Ceremonies covers both key ceremonies (CA key ops) and controlled-user approvals
+            // (promote/demote/delete of privileged users), so it lives with governance/oversight
+            // here rather than CA Management; its quorum config is in Settings, also Administration.
+            // Placed at the top of this group as it's used more often than the rest.
+            { name: 'Ceremonies', path: '/ceremonies', icon: '\u2638', requiredRoles: ADMIN_OPERATOR },
+            { name: 'Tenants & Quotas', path: '/tenants', icon: '\u2616', requiredRoles: ADMIN_ONLY },
             { name: 'Settings', path: '/settings', icon: '\u2699', requiredRoles: ADMIN_ONLY },
             { name: 'Audit Logs', path: '/audit', icon: '\u2709', requiredRoles: ADMIN_AUDITOR },
             { name: 'Notifications', path: '/notifications', icon: '\u2709', requiredRoles: ADMIN_OPERATOR },
-            { name: 'Quotas', path: '/quotas', icon: '\u2261', requiredRoles: ADMIN_ONLY },
             { name: 'Whitelists', path: '/whitelists', icon: '\u26E8', requiredRoles: ADMIN_ONLY },
             { name: 'Backup & Restore', path: '/backup', icon: '\u2B07', requiredRoles: ADMIN_ONLY },
             { name: 'Schedules', path: '/schedules', icon: '\u29D6', requiredRoles: ADMIN_ONLY },

@@ -6,15 +6,6 @@ function formatDate(d: string | null) {
     return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function extractCn(subjectDn: string | null | undefined): string | null {
-    if (!subjectDn) return null;
-    for (const part of subjectDn.split(',')) {
-        const trimmed = part.trim();
-        if (trimmed.toUpperCase().startsWith('CN=')) return trimmed.substring(3).trim();
-    }
-    return null;
-}
-
 const CrlDownload: React.FC = () => {
     const [cas, setCas] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
@@ -42,7 +33,6 @@ const CrlDownload: React.FC = () => {
             <div className="space-y-3">
                 {cas.map((ca) => {
                     const id = ca.serialNumber || ca.serial || ca.id;
-                    const friendlyName = ca.label || ca.name || extractCn(ca.subjectDN) || id;
                     return (
                         <div key={id} className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-5">
                             <div className="flex items-center justify-between">
@@ -58,17 +48,17 @@ const CrlDownload: React.FC = () => {
                                     )}
                                 </div>
                                 <div className="flex gap-2">
+                                    {/* No `download` attr: let the server's Content-Disposition
+                                        supply the CN-based filename, matching the cert downloads. */}
                                     <a
                                         href={`/crl/${id}`}
                                         className="px-3 py-1.5 text-xs bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 transition-colors"
-                                        download={`${friendlyName}.crl`}
                                     >
                                         Full CRL
                                     </a>
                                     <a
                                         href={`/crl/${id}/delta`}
                                         className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                        download={`${friendlyName}-delta.crl`}
                                     >
                                         Delta CRL
                                     </a>

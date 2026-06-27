@@ -100,6 +100,30 @@ public static class CertificateUtil
             }
         }
 
+        // Key Algorithm & Size — mirrors the CSR parser so cert detail/list views
+        // surface the same algorithm names. Previously left blank, which is why
+        // public/admin cert views showed an empty algorithm field.
+        var pubKey = cert.GetPublicKey();
+        info.KeyAlgorithm = pubKey switch
+        {
+            Org.BouncyCastle.Crypto.Parameters.RsaKeyParameters => "RSA",
+            Org.BouncyCastle.Crypto.Parameters.ECKeyParameters => "ECDSA",
+            Org.BouncyCastle.Crypto.Parameters.DsaPublicKeyParameters => "DSA",
+            Org.BouncyCastle.Crypto.Parameters.Ed25519PublicKeyParameters => "Ed25519",
+            Org.BouncyCastle.Crypto.Parameters.Ed448PublicKeyParameters => "Ed448",
+            Org.BouncyCastle.Crypto.Parameters.MLDsaPublicKeyParameters mlDsa => mlDsa.Parameters.Name,
+            Org.BouncyCastle.Crypto.Parameters.SlhDsaPublicKeyParameters slhDsa => slhDsa.Parameters.Name,
+            _ => "Unknown"
+        };
+
+        if (pubKey is Org.BouncyCastle.Crypto.Parameters.RsaKeyParameters rsa)
+            info.KeySize = rsa.Modulus.BitLength.ToString();
+        else if (pubKey is Org.BouncyCastle.Crypto.Parameters.ECKeyParameters ec)
+            info.KeySize = MapEcCurveOidToName(ec.PublicKeyParamSet?.Id ?? "EC");
+
+        // Signature Algorithm
+        info.SignatureAlgorithm = MapSignatureAlgorithmOidToName(cert.SigAlgOid);
+
         return info;
     }
 

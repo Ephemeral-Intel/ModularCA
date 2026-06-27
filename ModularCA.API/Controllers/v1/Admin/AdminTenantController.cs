@@ -237,6 +237,20 @@ public partial class AdminTenantController(
         if (tenant == null)
             return NotFound(new { error = $"Tenant with ID {id} not found" });
 
+        // Toggling a tenant's enabled state (e.g. re-enabling a disabled tenant) is a
+        // high-impact action — require step-up MFA. Quota-only edits (no IsEnabled in the
+        // request) are unaffected.
+        if (request.IsEnabled.HasValue && request.IsEnabled.Value != tenant.IsEnabled)
+        {
+            var op = request.IsEnabled.Value ? StepUpOps.EnableTenant : StepUpOps.DisableTenant;
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, op))
+                return StatusCode(403, new
+                {
+                    error = "MFA re-verification required to change a tenant's enabled state. Call /api/v1/auth/mfa/verify-stepup first.",
+                    requiresStepUp = true
+                });
+        }
+
         // Compute proposed security-policy values: null if the request is not carrying a
         // change (missing or equal to current). The policy-change service treats null as
         // "not changing" on both the IsDowngrade check and the ceremony snapshot.
@@ -433,10 +447,12 @@ public partial class AdminTenantController(
 
     /// <summary>
     /// Disables a tenant (soft delete). The tenant and its CAs remain in the database
-    /// but are marked as disabled. Does not delete any data.
+    /// but are marked as disabled. Does not delete any data. Requires step-up MFA.
     /// </summary>
     [HttpDelete("{id:guid}")]
-    public async Task<IActionResult> Disable(Guid id)
+    public async Task<IActionResult> Disable(
+        Guid id,
+        [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
     {
         await _currentUser.EnsureLoadedAsync();
 
@@ -446,6 +462,15 @@ public partial class AdminTenantController(
 
         if (!tenant.IsEnabled)
             return BadRequest(new { error = "Tenant is already disabled" });
+
+        // Disabling a tenant is a high-impact action — require step-up MFA re-verification.
+        if (!await MfaStepUpController.ValidateStepUpTokenAsync(
+                _cache, User, mfaToken, StepUpOps.DisableTenant))
+            return StatusCode(403, new
+            {
+                error = "MFA re-verification required to disable a tenant. Call /api/v1/auth/mfa/verify-stepup first.",
+                requiresStepUp = true
+            });
 
         tenant.IsEnabled = false;
         await _db.SaveChangesAsync();

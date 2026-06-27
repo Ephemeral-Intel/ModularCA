@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 export type KeyAlgorithm = 'ECDSA' | 'RSA' | 'Ed25519' | 'ML-DSA' | 'SLH-DSA';
 
@@ -28,6 +29,7 @@ const keySizeOptions: Record<KeyAlgorithm, string[]> = {
 };
 
 const RootCaConfig: React.FC<RootCaConfigProps> = ({ data, orgName, onChange }) => {
+    const autoFocusRef = useAutoFocus<HTMLInputElement>();
     // Auto-fill common name from org name when it hasn't been manually edited
     useEffect(() => {
         if (orgName && (data.commonName === '' || data.commonName === `${orgName} Root CA` || data.commonName.endsWith(' Root CA'))) {
@@ -67,6 +69,7 @@ const RootCaConfig: React.FC<RootCaConfigProps> = ({ data, orgName, onChange }) 
                         Common Name <span className="text-red-500">*</span>
                     </label>
                     <input
+                        ref={autoFocusRef}
                         id="cn"
                         type="text"
                         required

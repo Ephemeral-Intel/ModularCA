@@ -610,7 +610,7 @@ const RequestProfiles: React.FC = () => {
                         <div className="flex items-center justify-between p-4 border-b border-gray-300 dark:border-gray-700">
                             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{selectedProfile.name}</h3>
                             <button onClick={() => { setSelectedProfile(null); setEditingId(null); }}
-                                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white text-xl px-2">
+                                className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white text-xl px-2">
                                 X
                             </button>
                         </div>

@@ -182,7 +182,7 @@ const AuditLogs: React.FC = () => {
                 {(dateFrom || dateTo || filterCaId || filterActionType || filterUser) && (
                     <button
                         onClick={() => { setDateFrom(''); setDateTo(''); setFilterCaId(''); setFilterActionType(''); setFilterUser(''); setPage(1); }}
-                        className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white transition-colors"
+                        className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white transition-colors"
                     >
                         Clear filters
                     </button>

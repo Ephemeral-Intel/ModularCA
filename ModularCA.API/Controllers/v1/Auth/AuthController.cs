@@ -406,7 +406,10 @@ namespace ModularCA.API.Controllers.v1.Auth
                         });
                         await _cache.SetStringAsync($"webauthn:assert:{user.Id}", assertionOptions.ToJson(),
                             new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5) });
-                        response["assertionOptions"] = assertionOptions;
+                        // Embed as a parsed JsonNode so the global JsonStringEnumConverter does
+                        // not stringify the WebAuthn enums (alg/type) into values the browser
+                        // rejects. ToJson() is the library's spec-correct serializer.
+                        response["assertionOptions"] = System.Text.Json.Nodes.JsonNode.Parse(assertionOptions.ToJson())!;
                     }
 
                     return Ok(response);

@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
 import { apiGet, apiPost, apiPut, apiDelete } from '../api/client';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
@@ -47,11 +46,14 @@ const defaultForm = {
     publishUserCertificates: false,
 };
 
-const LdapPublishers: React.FC = () => {
-    const { caId } = useParams<{ caId: string }>();
+/// <summary>
+/// Reusable, CA-scoped LDAP publisher manager. Takes the CA id as a prop (rather than
+/// reading the route) so it can be embedded under a CA selector on the Distribution page
+/// as well as launched per-CA. Owns full CRUD: create/edit/delete/test/enable publishers.
+/// </summary>
+export const LdapPublisherManager: React.FC<{ caId: string }> = ({ caId }) => {
     const { showToast } = useToast();
 
-    const [caName, setCaName] = useState<string>('');
     const [publishers, setPublishers] = useState<LdapPublisher[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -88,24 +90,11 @@ const LdapPublishers: React.FC = () => {
     useEffect(() => {
         if (!caId) return;
         load();
-        apiGet<any>('/api/v1/admin/authorities/hierarchy')
-            .then((data) => {
-                const flat = flattenCas(Array.isArray(data) ? data : (data.items || data.authorities || []));
-                const ca = flat.find((c: any) => (c.id || c.certificateId) === caId);
-                if (ca) setCaName(ca.name || ca.subjectDN || caId);
-                else setCaName(caId);
-            })
-            .catch(() => setCaName(caId));
+        setShowCreate(false);
+        setEditingId(null);
+        setExpandedKey(null);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [caId]);
-
-    const flattenCas = (cas: any[]): any[] => {
-        const result: any[] = [];
-        for (const ca of cas) {
-            result.push(ca);
-            if (ca.children?.length > 0) result.push(...flattenCas(ca.children));
-        }
-        return result;
-    };
 
     const handleCreate = async () => {
         if (!form.name.trim() || !form.host.trim() || !form.baseDn.trim()) {
@@ -331,19 +320,7 @@ const LdapPublishers: React.FC = () => {
     );
 
     return (
-        <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-            {/* Header */}
-            <div className="flex items-center gap-3">
-                <Link to="/authorities/manage"
-                    className="text-sm text-blue-500 hover:text-blue-400 transition-colors">
-                    &larr; CA Management
-                </Link>
-            </div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-                LDAP Publishers{caName ? ` for ${caName}` : ''}
-            </h1>
-
-            {/* Create Form */}
+        <div className="space-y-4">
             <div className="flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Publishers</h2>
                 <button onClick={() => setShowCreate(!showCreate)}
@@ -363,7 +340,6 @@ const LdapPublishers: React.FC = () => {
                 </div>
             )}
 
-            {/* Publisher List */}
             <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
                 {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
                 {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
@@ -377,7 +353,7 @@ const LdapPublishers: React.FC = () => {
                         <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
                             <button onClick={() => setExpandedKey(expanded ? null : key)}
                                 className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors">
-                                <span className="text-gray-600 text-xs">{expanded ? '\u25BC' : '\u25B6'}</span>
+                                <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
                                 <StatusBadge status={p.enabled ? 'enabled' : 'disabled'} />
                                 <span className="text-sm text-gray-900 dark:text-white font-medium">{p.name}</span>
                                 <span className="font-mono text-xs text-gray-600 dark:text-gray-400">{p.host}:{p.port}</span>
@@ -459,4 +435,4 @@ const LdapPublishers: React.FC = () => {
     );
 };
 
-export default LdapPublishers;
+export default LdapPublisherManager;

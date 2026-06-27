@@ -242,7 +242,20 @@ public class ModularCAHealthCheck : IHealthCheck
         try
         {
             var configDir = Path.Combine(AppContext.BaseDirectory, "config");
-            var driveInfo = new DriveInfo(Path.GetPathRoot(configDir) ?? "C:");
+            // Resolve to the directory we actually want to measure. If config/ doesn't
+            // exist yet (fresh install), fall back to the binary directory, which always does.
+            var measurePath = Directory.Exists(configDir) ? configDir : AppContext.BaseDirectory;
+
+            // Pick the value DriveInfo can resolve on each platform:
+            //  - Windows: DriveInfo requires a drive ROOT ("C:\"), so use GetPathRoot.
+            //  - Linux/macOS: GetPathRoot returns "/" for every absolute path, which can
+            //    point at the wrong filesystem (e.g. a tiny read-only composefs/ostree root
+            //    showing 0 bytes free → permanent false "degraded"). Hand DriveInfo the path
+            //    itself so statvfs resolves the real mount that backs config/keystore.
+            var drivePath = OperatingSystem.IsWindows()
+                ? (Path.GetPathRoot(measurePath) ?? "C:\\")
+                : measurePath;
+            var driveInfo = new DriveInfo(drivePath);
 
             var freeGb = driveInfo.AvailableFreeSpace / (1024.0 * 1024.0 * 1024.0);
 

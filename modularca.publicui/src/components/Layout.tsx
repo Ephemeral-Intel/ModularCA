@@ -6,7 +6,6 @@ const navItems = [
     { name: 'Home', path: '/' },
     { name: 'CA Certificates', path: '/certificates' },
     { name: 'CRL Downloads', path: '/crl' },
-    { name: 'Certificate Search', path: '/search' },
     { name: 'ACME', path: '/acme' },
 ];
 
@@ -44,7 +43,7 @@ const Layout: React.FC = () => {
                                         className={`px-3 py-2 rounded text-sm transition-colors ${
                                             active
                                                 ? 'bg-blue-600/20 text-blue-800 dark:text-blue-300'
-                                                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-800'
+                                                : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800'
                                         }`}
                                     >
                                         {item.name}
@@ -82,7 +81,7 @@ const Layout: React.FC = () => {
                             const active = item.path === '/' ? location.pathname === '/' : location.pathname.startsWith(item.path);
                             return (
                                 <Link key={item.path} to={item.path} onClick={() => setMenuOpen(false)}
-                                    className={`px-3 py-2 rounded text-sm transition-colors ${active ? 'bg-blue-600/20 text-blue-800 dark:text-blue-300' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`}>
+                                    className={`px-3 py-2 rounded text-sm transition-colors ${active ? 'bg-blue-600/20 text-blue-800 dark:text-blue-300' : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800'}`}>
                                     {item.name}
                                 </Link>
                             );

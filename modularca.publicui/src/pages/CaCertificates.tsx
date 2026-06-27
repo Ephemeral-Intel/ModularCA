@@ -16,6 +16,20 @@ function extractCn(subjectDn: string | null | undefined): string | null {
     return null;
 }
 
+// Pull the filename from a Content-Disposition header so the portal saves files
+// under the same formal CN-based name the server sends (e.g. "Test-Root-CA.cer"),
+// matching the direct/AIA download URLs. Falls back to the supplied default.
+function filenameFromContentDisposition(header: string | null, fallback: string): string {
+    if (!header) return fallback;
+    // Prefer RFC 5987 filename*=UTF-8''… (handles non-ASCII), then plain filename=.
+    const star = header.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+    if (star) {
+        try { return decodeURIComponent(star[1].trim().replace(/^"|"$/g, '')); } catch { /* fall through */ }
+    }
+    const plain = header.match(/filename="?([^";]+)"?/i);
+    return plain ? plain[1].trim() : fallback;
+}
+
 const CaCertificates: React.FC = () => {
     const { showToast } = useToast();
     const [cas, setCas] = useState<any[]>([]);
@@ -49,7 +63,7 @@ const CaCertificates: React.FC = () => {
                         <div key={id} className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
                             <button
                                 onClick={() => setExpanded(isExpanded ? null : id)}
-                                className="w-full px-5 py-4 flex items-center justify-between text-left hover:bg-gray-200/50 dark:hover:bg-gray-200 dark:bg-gray-700/50 transition-colors"
+                                className="w-full px-5 py-4 flex items-center justify-between text-left hover:bg-gray-200/50 dark:bg-gray-700/50 dark:hover:bg-gray-700 transition-colors"
                             >
                                 <div>
                                     <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{ca.subjectDN || ca.name}</h3>
@@ -66,7 +80,7 @@ const CaCertificates: React.FC = () => {
                                         <div><span className="text-gray-600">Issuer:</span> <span className="text-gray-700 dark:text-gray-300">{ca.issuerDN || ca.issuer || '-'}</span></div>
                                         <div><span className="text-gray-600">Not Before:</span> <span className="text-gray-700 dark:text-gray-300">{formatDate(ca.notBefore)}</span></div>
                                         <div><span className="text-gray-600">Not After:</span> <span className="text-gray-700 dark:text-gray-300">{formatDate(ca.notAfter)}</span></div>
-                                        <div><span className="text-gray-600">Algorithm:</span> <span className="text-gray-700 dark:text-gray-300">{ca.keyAlgorithm || ca.signatureAlgorithm || '-'}</span></div>
+                                        <div><span className="text-gray-600">Algorithm:</span> <span className="text-gray-700 dark:text-gray-300">{[ca.keyAlgorithm, ca.keySize].filter(Boolean).join(' ') || ca.signatureAlgorithm || '-'}</span></div>
                                     </div>
                                     <div className="flex gap-2">
                                         <button
@@ -77,7 +91,7 @@ const CaCertificates: React.FC = () => {
                                                     const pem = await resp.text();
                                                     const a = document.createElement('a');
                                                     a.href = URL.createObjectURL(new Blob([pem], { type: 'application/x-pem-file' }));
-                                                    a.download = `${friendlyName}.pem`;
+                                                    a.download = filenameFromContentDisposition(resp.headers.get('Content-Disposition'), `${friendlyName}.pem`);
                                                     a.click();
                                                 } catch { showToast('error', 'Download failed'); }
                                             }}
@@ -93,7 +107,7 @@ const CaCertificates: React.FC = () => {
                                                     const blob = await resp.blob();
                                                     const a = document.createElement('a');
                                                     a.href = URL.createObjectURL(blob);
-                                                    a.download = `${friendlyName}.cer`;
+                                                    a.download = filenameFromContentDisposition(resp.headers.get('Content-Disposition'), `${friendlyName}.cer`);
                                                     a.click();
                                                 } catch { showToast('error', 'Download failed'); }
                                             }}

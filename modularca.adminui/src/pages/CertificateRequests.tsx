@@ -343,7 +343,7 @@ const CertificateRequests: React.FC = () => {
                             </h3>
                             <button
                                 onClick={() => !actionInProgress && setSelectedCsr(null)}
-                                className="text-gray-600 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white text-lg transition-colors"
+                                className="text-gray-600 hover:text-gray-900 dark:hover:text-white dark:text-white text-lg transition-colors"
                             >
                                 ✕
                             </button>

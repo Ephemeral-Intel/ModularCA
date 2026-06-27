@@ -5,6 +5,7 @@ using ModularCA.API.Filters;
 using ModularCA.Database;
 using ModularCA.Shared.Entities;
 using ModularCA.Shared.Enums;
+using ModularCA.Auth.Authorization;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Shared.Interfaces;
 
@@ -19,11 +20,13 @@ namespace ModularCA.API.Controllers.v1.Admin;
 public class AdminRoleAssignmentController(
     ModularCADbContext db,
     ICurrentUserService currentUser,
-    IAuditService audit) : ControllerBase
+    IAuditService audit,
+    IControlledUserCeremonyService controlledUserSvc) : ControllerBase
 {
     private readonly ModularCADbContext _db = db;
     private readonly ICurrentUserService _currentUser = currentUser;
     private readonly IAuditService _audit = audit;
+    private readonly IControlledUserCeremonyService _controlledUserSvc = controlledUserSvc;
 
     /// <summary>
     /// Lists role assignments with optional filtering by user, group, or role.
@@ -151,6 +154,43 @@ public class AdminRoleAssignmentController(
         if (duplicate)
             return Conflict(new { error = "An identical role assignment already exists." });
 
+        // Controlled-user gate: assigning a role that carries a controlled capability (e.g.
+        // system.manage) promotes a controlled user/group. A non-super must route it through a
+        // ControlledUserChange ceremony; system-super assigns directly.
+        var minted = await _controlledUserSvc.ClassifyRoleAssignmentAsync(request.RoleId, request.CertificateAuthorityId);
+        if (minted != null && _currentUser.User != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id))
+        {
+            if (!await _controlledUserSvc.CanInitiateAsync(_currentUser.User.Id, minted.Value))
+                return StatusCode(403, new { error = "You cannot assign a role above your own tier. A higher-tier admin must initiate this." });
+
+            string? targetUsername = request.UserId.HasValue
+                ? await _db.Users.Where(u => u.Id == request.UserId.Value).Select(u => u.Username).FirstOrDefaultAsync()
+                : null;
+
+            var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                new Shared.Models.ControlledUserChangeParameters
+                {
+                    ChangeType = "AssignRole",
+                    TargetUserId = request.UserId ?? Guid.Empty,
+                    TargetUsername = targetUsername,
+                    RoleId = request.RoleId,
+                    GroupId = request.GroupId,
+                    TenantId = request.TenantId,
+                    CertificateAuthorityId = request.CertificateAuthorityId,
+                },
+                minted.Value,
+                _currentUser.User.Id,
+                _currentUser.User.Username ?? string.Empty);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                requiresCeremony = true,
+                message = "This role assignment promotes a controlled user and requires a controlled-user ceremony. "
+                          + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+            });
+        }
+
         var assignment = new RoleAssignmentEntity
         {
             RoleId = request.RoleId,
@@ -213,6 +253,41 @@ public class AdminRoleAssignmentController(
 
         if (assignment == null)
             return NotFound(new { error = $"Role assignment with ID {id} not found." });
+
+        // Controlled-user gate (demote): unassigning a role that carries a controlled capability
+        // demotes a controlled user — non-super routes it through a ceremony, with the last-user guard.
+        var demoteTier = await _controlledUserSvc.ClassifyRoleAssignmentAsync(assignment.RoleId, assignment.CertificateAuthorityId);
+        if (demoteTier != null && _currentUser.User != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id))
+        {
+            if (assignment.UserId.HasValue
+                && await _controlledUserSvc.CountDominatingControlledUsersAsync(demoteTier.Value, assignment.UserId.Value) == 0)
+                return BadRequest(new { error = "Refusing to remove the last controlled user of this scope." });
+            if (!await _controlledUserSvc.CanInitiateAsync(_currentUser.User.Id, demoteTier.Value))
+                return StatusCode(403, new { error = "You cannot demote a privilege above your own tier." });
+
+            var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                new Shared.Models.ControlledUserChangeParameters
+                {
+                    ChangeType = "UnassignRole",
+                    TargetUserId = assignment.UserId ?? Guid.Empty,
+                    RecordId = assignment.Id,
+                    RoleId = assignment.RoleId,
+                    GroupId = assignment.GroupId,
+                    TenantId = assignment.TenantId,
+                    CertificateAuthorityId = assignment.CertificateAuthorityId,
+                },
+                demoteTier.Value,
+                _currentUser.User.Id,
+                _currentUser.User.Username ?? string.Empty);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                requiresCeremony = true,
+                message = "Unassigning this role demotes a controlled user and requires a controlled-user ceremony. "
+                          + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+            });
+        }
 
         _db.RoleAssignments.Remove(assignment);
         await _db.SaveChangesAsync();

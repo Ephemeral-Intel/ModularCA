@@ -61,6 +61,14 @@ public class TenantEntity
     public int CeremonyRequiredApprovals { get; set; } = 2;
 
     /// <summary>
+    /// Per-tenant "user quorum" override for controlled-user ceremonies (promote/demote/delete
+    /// of an admin/operator/CA-admin) scoped to this tenant's CAs. Null = fall back to the
+    /// system-level <see cref="SecurityPolicyEntity.UserQuorum"/>. Distinct from
+    /// <see cref="CeremonyRequiredApprovals"/> (the CA/key quorum).
+    /// </summary>
+    public int? UserCeremonyRequiredApprovals { get; set; }
+
+    /// <summary>
     /// Soft-delete flag. When true, the row is hidden from every
     /// application query via the EF global query filter in
     /// <see cref="ModularCA.Database.ModularCADbContext"/>. Call

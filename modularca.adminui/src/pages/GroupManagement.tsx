@@ -223,11 +223,14 @@ const GroupManagement: React.FC = () => {
     const handleAddMember = async (groupId: string) => {
         if (!selectedUserId) return;
         try {
-            await apiPost(`/api/v1/admin/groups/${groupId}/members`, { userId: selectedUserId });
+            const res: any = await apiPost(`/api/v1/admin/groups/${groupId}/members`, { userId: selectedUserId });
             setAddingMemberGroup(null);
             setSelectedUserId('');
             fetchGroupDetail(groupId);
             setRefreshTrigger((t) => t + 1);
+            // A controlled-group add returns 202 with a ceremony instead of applying immediately.
+            if (res?.requiresCeremony)
+                showToast('info', res.message || 'A controlled-user ceremony was started — approve it on the Ceremonies page.');
         } catch (err: any) {
             showToast('error', err.message || 'Failed to add member');
         }
@@ -241,9 +244,11 @@ const GroupManagement: React.FC = () => {
             title: 'Remove Member',
             message: 'Are you sure you want to remove this member from the group?',
             action: async () => {
-                await apiDelete(`/api/v1/admin/groups/${groupId}/members/${userId}`);
+                const res: any = await apiDelete(`/api/v1/admin/groups/${groupId}/members/${userId}`);
                 fetchGroupDetail(groupId);
                 setRefreshTrigger((t) => t + 1);
+                if (res?.requiresCeremony)
+                    showToast('info', res.message || 'A controlled-user ceremony was started — approve it on the Ceremonies page.');
             },
         });
     };
@@ -373,7 +378,7 @@ const GroupManagement: React.FC = () => {
                 {(filterCa || filterTemplate || filterType) && (
                     <button
                         onClick={() => { setFilterCa(''); setFilterTemplate(''); setFilterType(''); }}
-                        className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white transition-colors"
+                        className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white transition-colors"
                     >
                         Clear filters
                     </button>

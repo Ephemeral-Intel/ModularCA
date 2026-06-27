@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
@@ -11,8 +12,6 @@ import {
     type SchedulerJob,
     type SchedulerJobUpdate,
     type SchedulerSchedules,
-    deleteCrlSchedule,
-    deleteLdapPublisher,
     getSchedulerHealth,
     getSchedulerJobs,
     getSchedulerSchedules,
@@ -20,8 +19,6 @@ import {
     runLdapSchedule,
     runSchedulerJob,
     setSchedulerJobEnabled,
-    updateCrlSchedule,
-    updateLdapPublisher,
     updateSchedulerConfig,
     updateSchedulerJob,
 } from '../api/scheduler';
@@ -401,173 +398,6 @@ const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, now
 };
 
 // ---------------------------------------------------------------------------
-// CRL Edit Modal
-// ---------------------------------------------------------------------------
-
-const CrlEditModal: React.FC<{ entry: CrlScheduleEntry | null; onClose: () => void; onSaved: () => void; }> = ({ entry, onClose, onSaved }) => {
-    const { requireStepUp } = useStepUp();
-    const { showToast } = useToast();
-    const [updateInterval, setUpdateInterval] = useState('');
-    const [deltaInterval, setDeltaInterval] = useState('');
-    const [saving, setSaving] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-
-    useEffect(() => {
-        if (entry) {
-            setUpdateInterval(entry.updateInterval || '');
-            setDeltaInterval(entry.deltaInterval || '');
-            setError(null);
-        }
-    }, [entry]);
-
-    if (!entry) return null;
-    const updateOk = isCronShapeValid(updateInterval);
-    const deltaOk = !deltaInterval || isCronShapeValid(deltaInterval);
-    const canSave = updateOk && deltaOk && !saving;
-
-    const handleSave = async () => {
-        setSaving(true);
-        setError(null);
-        try {
-            await updateCrlSchedule(entry.taskId, {
-                updateInterval,
-                deltaInterval: deltaInterval || null,
-                isDelta: entry.isDelta,
-            }, requireStepUp);
-            showToast('success', `Updated CRL schedule "${entry.name}"`);
-            onSaved();
-            onClose();
-        } catch (err: any) {
-            if (err?.message === 'Step-up MFA cancelled') return;
-            setError(err?.message || 'Failed to update CRL schedule');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-2xl p-6 w-full max-w-md mx-4 space-y-4">
-                <h3 className="text-lg font-bold text-gray-900 dark:text-white">Edit CRL Schedule</h3>
-                <p className="text-xs text-gray-600 dark:text-gray-400">{entry.caLabel} &middot; {entry.name}</p>
-                <div>
-                    <label className={labelClass}>Update Interval (cron)</label>
-                    <input type="text" value={updateInterval} onChange={(e) => setUpdateInterval(e.target.value)}
-                        placeholder="0 */6 * * *" className={`${inputClass} font-mono`} />
-                    {!updateOk && updateInterval.length > 0 && (
-                        <p className="text-[10px] text-red-700 dark:text-red-400 mt-1">Must be 5 space-separated fields.</p>
-                    )}
-                </div>
-                <div>
-                    <label className={labelClass}>Delta Interval (cron, optional)</label>
-                    <input type="text" value={deltaInterval} onChange={(e) => setDeltaInterval(e.target.value)}
-                        placeholder="0 * * * *" className={`${inputClass} font-mono`} />
-                    {!deltaOk && (
-                        <p className="text-[10px] text-red-700 dark:text-red-400 mt-1">Must be 5 space-separated fields.</p>
-                    )}
-                </div>
-                {error && <div className="p-2 bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded text-xs text-red-800 dark:text-red-300">{error}</div>}
-                <div className="flex justify-end gap-3">
-                    <button onClick={onClose} disabled={saving}
-                        className="px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">Cancel</button>
-                    <button onClick={handleSave} disabled={!canSave} className={primaryButton}>{saving ? 'Saving...' : 'Save'}</button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// ---------------------------------------------------------------------------
-// LDAP Edit Modal
-// ---------------------------------------------------------------------------
-
-const LdapEditModal: React.FC<{ entry: LdapPublisherEntry | null; onClose: () => void; onSaved: () => void; }> = ({ entry, onClose, onSaved }) => {
-    const { requireStepUp } = useStepUp();
-    const { showToast } = useToast();
-    const [updateInterval, setUpdateInterval] = useState('');
-    const [host, setHost] = useState('');
-    const [port, setPort] = useState('');
-    const [baseDn, setBaseDn] = useState('');
-    const [saving, setSaving] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-
-    useEffect(() => {
-        if (entry) {
-            setUpdateInterval(entry.updateInterval || '');
-            setHost(entry.host || '');
-            setPort(String(entry.port ?? ''));
-            setBaseDn(entry.baseDn || '');
-            setError(null);
-        }
-    }, [entry]);
-
-    if (!entry) return null;
-    const portNum = parseInt(port, 10);
-    const portOk = Number.isFinite(portNum) && portNum > 0 && portNum < 65536;
-    const cronOk = isCronShapeValid(updateInterval);
-    const canSave = portOk && cronOk && !saving;
-
-    const handleSave = async () => {
-        setSaving(true);
-        setError(null);
-        try {
-            await updateLdapPublisher(entry.id, {
-                host,
-                port: portNum,
-                baseDn,
-                updateInterval,
-            }, requireStepUp);
-            showToast('success', `Updated LDAP publisher (${entry.host})`);
-            onSaved();
-            onClose();
-        } catch (err: any) {
-            if (err?.message === 'Step-up MFA cancelled') return;
-            setError(err?.message || 'Failed to update LDAP publisher');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-2xl p-6 w-full max-w-md mx-4 space-y-4">
-                <h3 className="text-lg font-bold text-gray-900 dark:text-white">Edit LDAP Publisher</h3>
-                <p className="text-xs text-gray-600 dark:text-gray-400">{entry.caLabel}</p>
-                <div className="grid grid-cols-2 gap-3">
-                    <div>
-                        <label className={labelClass}>Host</label>
-                        <input type="text" value={host} onChange={(e) => setHost(e.target.value)} className={inputClass} />
-                    </div>
-                    <div>
-                        <label className={labelClass}>Port</label>
-                        <input type="text" inputMode="numeric" value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ''))} className={inputClass} />
-                        {!portOk && <p className="text-[10px] text-red-700 dark:text-red-400 mt-1">Port must be 1-65535.</p>}
-                    </div>
-                </div>
-                <div>
-                    <label className={labelClass}>Base DN</label>
-                    <input type="text" value={baseDn} onChange={(e) => setBaseDn(e.target.value)} className={inputClass} />
-                </div>
-                <div>
-                    <label className={labelClass}>Update Interval (cron)</label>
-                    <input type="text" value={updateInterval} onChange={(e) => setUpdateInterval(e.target.value)}
-                        placeholder="0 */6 * * *" className={`${inputClass} font-mono`} />
-                    {!cronOk && updateInterval.length > 0 && (
-                        <p className="text-[10px] text-red-700 dark:text-red-400 mt-1">Must be 5 space-separated fields.</p>
-                    )}
-                </div>
-                {error && <div className="p-2 bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded text-xs text-red-800 dark:text-red-300">{error}</div>}
-                <div className="flex justify-end gap-3">
-                    <button onClick={onClose} disabled={saving}
-                        className="px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">Cancel</button>
-                    <button onClick={handleSave} disabled={!canSave} className={primaryButton}>{saving ? 'Saving...' : 'Save'}</button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// ---------------------------------------------------------------------------
 // Schedules Section (CRL + LDAP, grouped by CA)
 // ---------------------------------------------------------------------------
 
@@ -581,10 +411,6 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onC
     const { requireStepUp } = useStepUp();
     const { showToast } = useToast();
     const [collapsedCas, setCollapsedCas] = useState<Record<string, boolean>>({});
-    const [editingCrl, setEditingCrl] = useState<CrlScheduleEntry | null>(null);
-    const [editingLdap, setEditingLdap] = useState<LdapPublisherEntry | null>(null);
-    const [confirmAction, setConfirmAction] = useState<{ title: string; message: string; confirmLabel: string; action: () => Promise<void> } | null>(null);
-    const [confirmLoading, setConfirmLoading] = useState(false);
 
     const grouped = useMemo(() => {
         const map = new Map<string, { caLabel: string; crl: CrlScheduleEntry[]; ldap: LdapPublisherEntry[] }>();
@@ -622,28 +448,6 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onC
             showToast('error', err?.message || 'Failed to trigger LDAP publish');
         }
     };
-
-    const askDeleteCrl = (entry: CrlScheduleEntry) => setConfirmAction({
-        title: 'Delete CRL Schedule',
-        message: `Delete "${entry.name}" for ${entry.caLabel}? Relying parties that fetch this CRL will fall back to whatever distribution point they have cached until another schedule is created.`,
-        confirmLabel: 'Delete',
-        action: async () => {
-            await deleteCrlSchedule(entry.taskId, requireStepUp);
-            showToast('success', `Deleted CRL schedule "${entry.name}"`);
-            onChanged();
-        },
-    });
-
-    const askDeleteLdap = (entry: LdapPublisherEntry) => setConfirmAction({
-        title: 'Delete LDAP Publisher',
-        message: `Delete LDAP publisher ${entry.host}:${entry.port} for ${entry.caLabel}? CRL/cert publications to this directory will stop until a new publisher is configured.`,
-        confirmLabel: 'Delete',
-        action: async () => {
-            await deleteLdapPublisher(entry.id, requireStepUp);
-            showToast('success', `Deleted LDAP publisher (${entry.host})`);
-            onChanged();
-        },
-    });
 
     return (
         <section className="space-y-3">
@@ -695,13 +499,11 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onC
                                                             <td className="px-2 py-1.5"><TimeCell iso={c.nextUpdateUtc} now={now} /></td>
                                                             <td className="px-2 py-1.5"><StatusBadge status={c.enabled ? 'enabled' : 'disabled'} /></td>
                                                             <td className="px-2 py-1.5 text-right">
-                                                                <div className="inline-flex gap-1">
-                                                                    <button onClick={() => setEditingCrl(c)}
-                                                                        className={`${smallButton} bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700 hover:bg-blue-100 dark:hover:bg-blue-900`}>Edit</button>
+                                                                <div className="inline-flex gap-1 items-center">
                                                                     <button onClick={() => handleRunCrl(c)}
                                                                         className={`${smallButton} bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-300 border-green-300 dark:border-green-700 hover:bg-green-100 dark:hover:bg-green-900`}>Run Now</button>
-                                                                    <button onClick={() => askDeleteCrl(c)}
-                                                                        className={`${smallButton} bg-red-50 dark:bg-red-900/50 text-red-800 dark:text-red-300 border-red-300 dark:border-red-700 hover:bg-red-100 dark:hover:bg-red-900`}>Delete</button>
+                                                                    <Link to="/distribution?tab=crl"
+                                                                        className={`${smallButton} bg-gray-100 dark:bg-gray-700/50 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600`}>Edit on Distribution page</Link>
                                                                 </div>
                                                             </td>
                                                         </tr>
@@ -749,13 +551,11 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onC
                                                                 <td className="px-2 py-1.5">{flags || '-'}</td>
                                                                 <td className="px-2 py-1.5"><StatusBadge status={l.enabled ? 'enabled' : 'disabled'} /></td>
                                                                 <td className="px-2 py-1.5 text-right">
-                                                                    <div className="inline-flex gap-1">
-                                                                        <button onClick={() => setEditingLdap(l)}
-                                                                            className={`${smallButton} bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700 hover:bg-blue-100 dark:hover:bg-blue-900`}>Edit</button>
+                                                                    <div className="inline-flex gap-1 items-center">
                                                                         <button onClick={() => handleRunLdap(l)}
                                                                             className={`${smallButton} bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-300 border-green-300 dark:border-green-700 hover:bg-green-100 dark:hover:bg-green-900`}>Run Now</button>
-                                                                        <button onClick={() => askDeleteLdap(l)}
-                                                                            className={`${smallButton} bg-red-50 dark:bg-red-900/50 text-red-800 dark:text-red-300 border-red-300 dark:border-red-700 hover:bg-red-100 dark:hover:bg-red-900`}>Delete</button>
+                                                                        <Link to={`/distribution?tab=ldap${l.certificateAuthorityId ? `&caId=${l.certificateAuthorityId}` : ''}`}
+                                                                            className={`${smallButton} bg-gray-100 dark:bg-gray-700/50 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600`}>Edit on Distribution page</Link>
                                                                     </div>
                                                                 </td>
                                                             </tr>
@@ -771,32 +571,6 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onC
                     </div>
                 );
             })}
-
-            <CrlEditModal entry={editingCrl} onClose={() => setEditingCrl(null)} onSaved={onChanged} />
-            <LdapEditModal entry={editingLdap} onClose={() => setEditingLdap(null)} onSaved={onChanged} />
-
-            <ConfirmModal
-                isOpen={!!confirmAction}
-                title={confirmAction?.title || ''}
-                message={confirmAction?.message || ''}
-                confirmLabel={confirmAction?.confirmLabel || 'Confirm'}
-                loading={confirmLoading}
-                onConfirm={async () => {
-                    if (!confirmAction) return;
-                    setConfirmLoading(true);
-                    try {
-                        await confirmAction.action();
-                    } catch (err: any) {
-                        if (err?.message !== 'Step-up MFA cancelled') {
-                            showToast('error', err?.message || 'Operation failed');
-                        }
-                    } finally {
-                        setConfirmLoading(false);
-                        setConfirmAction(null);
-                    }
-                }}
-                onCancel={() => setConfirmAction(null)}
-            />
         </section>
     );
 };

@@ -54,9 +54,11 @@ public class AdminCertificateController(
     /// Supports filtering by subject, serial number, issuer, status, key algorithm, and date ranges.
     /// Returns a paginated result with total count information.
     /// </summary>
+    /// <param name="search">Free-text filter — OR match across Subject DN, serial, SAN, and issuer.</param>
     /// <param name="subject">Partial match filter on the certificate Subject DN.</param>
     /// <param name="serial">Partial match filter on the certificate serial number.</param>
     /// <param name="issuer">Partial match filter on the certificate issuer.</param>
+    /// <param name="caId">Filter to certificates issued by this certificate authority.</param>
     /// <param name="status">Status filter: "active" (not revoked and not expired), "revoked", or "expired".</param>
     /// <param name="keyAlgorithm">Filter on key algorithm by searching the KeyUsagesJson column (e.g. "RSA", "ECDSA", "Ed25519").</param>
     /// <param name="san">Partial match filter on subject alternative names JSON.</param>
@@ -71,9 +73,11 @@ public class AdminCertificateController(
     [ProducesResponseType(200)]
     [ProducesResponseType(401)]
     public async Task<IActionResult> ListCertificates(
+        [FromQuery] string? search,
         [FromQuery] string? subject,
         [FromQuery] string? serial,
         [FromQuery] string? issuer,
+        [FromQuery] Guid? caId,
         [FromQuery] string? status,
         [FromQuery] string? keyAlgorithm,
         [FromQuery] string? san,
@@ -100,52 +104,34 @@ public class AdminCertificateController(
         // apply them as Where predicates on the IQueryable.
         var userId = _currentUser.User.Id;
 
-        // System-level cert.view — full visibility, no per-CA restriction.
-        // Uses the authorization service which checks all four grant sources (direct group
-        // grants, group role assignments, direct user grants, user role assignments).
-        var hasSystemAccess = await _groupAuth.HasSystemCapabilityAsync(userId, Capabilities.CertView);
+        // Build the access-controlled base query (excludes CA certs, applies per-CA / ACL
+        // visibility). Shared with the expiry-histogram endpoint so the security filter is
+        // single-sourced.
+        var query = await BuildAccessibleCertificatesQueryAsync(userId);
 
-        HashSet<Guid>? allowedCaIds = null;
-        HashSet<Guid>? explicitAclCertIds = null;
-        if (!hasSystemAccess)
+        // Free-text search — OR match across the fields people actually search by.
+        if (!string.IsNullOrWhiteSpace(search))
         {
-            var caIdList = await _groupAuth.GetAccessibleCaIdsAsync(userId, Capabilities.CertView);
-            allowedCaIds = new HashSet<Guid>(caIdList);
-
-            var aclCertIds = await _dbContext.CertificateAccessLists
-                .Where(a => a.UserId == userId && a.AccessLevel >= CertificateAccessLevel.View)
-                .Select(a => a.CertificateId)
-                .ToListAsync();
-            explicitAclCertIds = new HashSet<Guid>(aclCertIds);
+            var s = search.Trim();
+            query = query.Where(c =>
+                c.SubjectDN.Contains(s)
+                || c.SerialNumber.Contains(s)
+                || c.SubjectAlternativeNamesJson.Contains(s)
+                || c.Issuer.Contains(s));
         }
 
-        // Build IQueryable filter chain against the database
-        var query = _dbContext.Certificates
-            .AsNoTracking()
-            .Where(c => !c.IsCA);
-
-        if (!hasSystemAccess)
+        // Issuing-CA filter — certs whose signing profile is issued by this CA's certificate.
+        if (caId.HasValue)
         {
-            var allowedCaIdList = allowedCaIds!.ToList();
-            var aclCertIdList = explicitAclCertIds!.ToList();
-
-            // Resolve the CertificateId values for the allowed CAs so we can match
-            // via the signing profile's IssuerId (which points at the CA's cert row).
-            var allowedCaCertIds = await _dbContext.CertificateAuthorities
-                .Where(ca => allowedCaIdList.Contains(ca.Id) && ca.CertificateId != null)
-                .Select(ca => ca.CertificateId!.Value)
-                .ToListAsync();
-
-            // A certificate is visible if:
-            //   (a) it was signed by a CA the user has cert.view access to
-            //       (signing profile's IssuerId matches one of the allowed CA cert IDs), OR
-            //   (b) the user is the requestor of the request that produced it, OR
-            //   (c) the user has an explicit ACL grant at View level or higher.
-            query = query.Where(c =>
-                (c.SigningProfileId != null && _dbContext.SigningProfiles
-                    .Any(sp => sp.Id == c.SigningProfileId && sp.IssuerId != null && allowedCaCertIds.Contains(sp.IssuerId.Value)))
-                || _dbContext.CertificateRequests.Any(r => r.IssuedCertificateId == c.CertificateId && r.RequestorUserId == userId)
-                || aclCertIdList.Contains(c.CertificateId));
+            var caCertId = await _dbContext.CertificateAuthorities
+                .Where(ca => ca.Id == caId.Value)
+                .Select(ca => ca.CertificateId)
+                .FirstOrDefaultAsync();
+            if (caCertId != null)
+                query = query.Where(c => c.SigningProfileId != null
+                    && _dbContext.SigningProfiles.Any(sp => sp.Id == c.SigningProfileId && sp.IssuerId == caCertId.Value));
+            else
+                query = query.Where(_ => false); // unknown CA → no matches
         }
 
         // Subject filter
@@ -178,9 +164,8 @@ public class AdminCertificateController(
             }
         }
 
-        // Key algorithm filter (searches the KeyUsagesJson or SubjectDN for algorithm hints)
-        if (!string.IsNullOrWhiteSpace(keyAlgorithm))
-            query = query.Where(c => c.KeyUsagesJson.Contains(keyAlgorithm));
+        // Key-algorithm filter is applied in memory below (the algorithm is derived from the
+        // raw certificate, not a queryable column).
 
         // Subject alternative name filter
         if (!string.IsNullOrWhiteSpace(san))
@@ -198,15 +183,31 @@ public class AdminCertificateController(
         if (issuedTo.HasValue)
             query = query.Where(c => c.NotBefore <= issuedTo.Value);
 
-        // Get total count before pagination
-        var total = await query.CountAsync();
+        List<ModularCA.Shared.Entities.CertificateEntity> entities;
+        int total;
 
-        // Apply ordering and pagination
-        var entities = await query
-            .OrderByDescending(c => c.NotBefore)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToListAsync();
+        if (!string.IsNullOrWhiteSpace(keyAlgorithm))
+        {
+            // Key algorithm isn't a queryable column (it's derived from the raw certificate),
+            // so materialise the DB-filtered set, parse each, filter, then page in memory. The
+            // other filters narrow the set first; the common no-algorithm path below still pages
+            // in the database.
+            var dbFiltered = await query.OrderByDescending(c => c.NotBefore).ToListAsync();
+            var matched = dbFiltered
+                .Where(c => string.Equals(ParseKeyInfo(c.RawCertificate).Algorithm, keyAlgorithm, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            total = matched.Count;
+            entities = matched.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+        }
+        else
+        {
+            total = await query.CountAsync();
+            entities = await query
+                .OrderByDescending(c => c.NotBefore)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+        }
 
         // Access control already applied by the IQueryable predicates above,
         // so we just map every page row. No more in-memory filtering after Skip/Take.
@@ -214,24 +215,9 @@ public class AdminCertificateController(
 
         foreach (var c in entities)
         {
-            // Extract key algorithm and size from the raw certificate
-            var certKeyAlgo = string.Empty;
-            var certKeySize = string.Empty;
-            var certSigAlgo = string.Empty;
-            if (c.RawCertificate != null && c.RawCertificate.Length > 0)
-            {
-                try
-                {
-                    var bcCert = new X509CertificateParser().ReadCertificate(c.RawCertificate);
-                    var pubKey = bcCert.GetPublicKey();
-                    if (pubKey is RsaKeyParameters rsa) { certKeyAlgo = "RSA"; certKeySize = rsa.Modulus.BitLength.ToString(); }
-                    else if (pubKey is ECPublicKeyParameters ec) { certKeyAlgo = "ECDSA"; certKeySize = ec.Parameters.Curve.FieldSize.ToString(); }
-                    else if (pubKey is Ed25519PublicKeyParameters) { certKeyAlgo = "Ed25519"; certKeySize = "256"; }
-                    else if (pubKey is Ed448PublicKeyParameters) { certKeyAlgo = "Ed448"; certKeySize = "456"; }
-                    certSigAlgo = bcCert.SigAlgName;
-                }
-                catch { /* parsing failed */ }
-            }
+            // Extract key algorithm/size/signature from the raw certificate (shared with the
+            // key-algorithm filter above).
+            var (certKeyAlgo, certKeySize, certSigAlgo) = ParseKeyInfo(c.RawCertificate);
 
             allowedItems.Add(new CertificateInfoModel
             {
@@ -273,6 +259,167 @@ public class AdminCertificateController(
             page,
             pageSize,
             items = allowedItems
+        });
+    }
+
+    /// <summary>
+    /// Parses a certificate's key algorithm, key size, and signature algorithm from its raw
+    /// (DER) bytes. Returns empties when the cert is missing or unparseable. Shared by the
+    /// list projection and the in-memory key-algorithm filter.
+    /// </summary>
+    private static (string Algorithm, string KeySize, string SignatureAlgorithm) ParseKeyInfo(byte[]? raw)
+    {
+        if (raw == null || raw.Length == 0)
+            return (string.Empty, string.Empty, string.Empty);
+        try
+        {
+            var bcCert = new X509CertificateParser().ReadCertificate(raw);
+            var pubKey = bcCert.GetPublicKey();
+            string algo = string.Empty, size = string.Empty;
+            if (pubKey is RsaKeyParameters rsa) { algo = "RSA"; size = rsa.Modulus.BitLength.ToString(); }
+            else if (pubKey is ECPublicKeyParameters ec) { algo = "ECDSA"; size = ec.Parameters.Curve.FieldSize.ToString(); }
+            else if (pubKey is Ed25519PublicKeyParameters) { algo = "Ed25519"; size = "256"; }
+            else if (pubKey is Ed448PublicKeyParameters) { algo = "Ed448"; size = "456"; }
+            else if (pubKey is DsaPublicKeyParameters dsa) { algo = "DSA"; size = dsa.Parameters?.P?.BitLength.ToString() ?? string.Empty; }
+            return (algo, size, bcCert.SigAlgName ?? string.Empty);
+        }
+        catch
+        {
+            return (string.Empty, string.Empty, string.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Builds the access-controlled certificate query: excludes CA certificates and, for callers
+    /// without system-level cert.view, restricts to certificates issued by an accessible CA,
+    /// requested by the caller, or granted via an explicit ACL. Shared by the list and
+    /// expiry-histogram endpoints so the visibility rules stay single-sourced.
+    /// </summary>
+    /// <param name="userId">The id of the current user whose visibility should be applied.</param>
+    /// <returns>An <see cref="IQueryable{T}"/> of certificates the user may view.</returns>
+    private async Task<IQueryable<CertificateEntity>> BuildAccessibleCertificatesQueryAsync(Guid userId)
+    {
+        // System-level cert.view — full visibility, no per-CA restriction. Uses the authorization
+        // service which checks all four grant sources (direct group grants, group role
+        // assignments, direct user grants, user role assignments).
+        var hasSystemAccess = await _groupAuth.HasSystemCapabilityAsync(userId, Capabilities.CertView);
+
+        var query = _dbContext.Certificates
+            .AsNoTracking()
+            .Where(c => !c.IsCA);
+
+        if (hasSystemAccess)
+            return query;
+
+        var allowedCaIdList = await _groupAuth.GetAccessibleCaIdsAsync(userId, Capabilities.CertView);
+
+        var aclCertIdList = await _dbContext.CertificateAccessLists
+            .Where(a => a.UserId == userId && a.AccessLevel >= CertificateAccessLevel.View)
+            .Select(a => a.CertificateId)
+            .ToListAsync();
+
+        // Resolve the CertificateId values for the allowed CAs so we can match via the signing
+        // profile's IssuerId (which points at the CA's cert row).
+        var allowedCaCertIds = await _dbContext.CertificateAuthorities
+            .Where(ca => allowedCaIdList.Contains(ca.Id) && ca.CertificateId != null)
+            .Select(ca => ca.CertificateId!.Value)
+            .ToListAsync();
+
+        // A certificate is visible if:
+        //   (a) it was signed by a CA the user has cert.view access to, OR
+        //   (b) the user is the requestor of the request that produced it, OR
+        //   (c) the user has an explicit ACL grant at View level or higher.
+        return query.Where(c =>
+            (c.SigningProfileId != null && _dbContext.SigningProfiles
+                .Any(sp => sp.Id == c.SigningProfileId && sp.IssuerId != null && allowedCaCertIds.Contains(sp.IssuerId.Value)))
+            || _dbContext.CertificateRequests.Any(r => r.IssuedCertificateId == c.CertificateId && r.RequestorUserId == userId)
+            || aclCertIdList.Contains(c.CertificateId));
+    }
+
+    /// <summary>
+    /// Returns certificate-expiry counts bucketed by month (or by day) and segmented by status,
+    /// for the expiry calendar's timeline histogram and month-grid drill-down. Honours the same
+    /// per-CA / ACL access control as the certificate list, so callers only see buckets for
+    /// certificates they can view. Buckets are sparse — only periods containing certificates are
+    /// returned.
+    /// </summary>
+    /// <param name="caId">Optional issuing-CA filter (same semantics as the certificate list).</param>
+    /// <param name="from">Optional minimum NotAfter (expiry) date to include.</param>
+    /// <param name="to">Optional maximum NotAfter (expiry) date to include.</param>
+    /// <param name="granularity">Bucket size: "month" (default) or "day".</param>
+    /// <returns>Sparse buckets with per-status counts plus grand totals.</returns>
+    [HttpGet("expiry-histogram")]
+    [ProducesResponseType(200)]
+    [ProducesResponseType(401)]
+    public async Task<IActionResult> ExpiryHistogram(
+        [FromQuery] Guid? caId,
+        [FromQuery] DateTime? from,
+        [FromQuery] DateTime? to,
+        [FromQuery] string? granularity)
+    {
+        await _currentUser.EnsureLoadedAsync();
+        if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+            return Unauthorized();
+
+        var userId = _currentUser.User.Id;
+        var query = await BuildAccessibleCertificatesQueryAsync(userId);
+
+        // Issuing-CA filter — same signing-profile join as the list endpoint.
+        if (caId.HasValue)
+        {
+            var caCertId = await _dbContext.CertificateAuthorities
+                .Where(ca => ca.Id == caId.Value)
+                .Select(ca => ca.CertificateId)
+                .FirstOrDefaultAsync();
+            if (caCertId != null)
+                query = query.Where(c => c.SigningProfileId != null
+                    && _dbContext.SigningProfiles.Any(sp => sp.Id == c.SigningProfileId && sp.IssuerId == caCertId.Value));
+            else
+                query = query.Where(_ => false); // unknown CA → no matches
+        }
+
+        if (from.HasValue) query = query.Where(c => c.NotAfter >= from.Value);
+        if (to.HasValue) query = query.Where(c => c.NotAfter <= to.Value);
+
+        // Pull only the two columns we need and bucket in memory. Two scalars per row keeps this
+        // cheap even with large inventories and avoids provider-specific GroupBy translation.
+        var rows = await query
+            .Select(c => new { c.NotAfter, c.Revoked })
+            .ToListAsync();
+
+        var now = DateTime.UtcNow;
+        var soonCutoff = now.AddDays(30);
+        var byDay = string.Equals(granularity, "day", StringComparison.OrdinalIgnoreCase);
+
+        var buckets = rows
+            .GroupBy(r => byDay ? r.NotAfter.Date : new DateTime(r.NotAfter.Year, r.NotAfter.Month, 1))
+            .Select(g => new
+            {
+                period = byDay ? g.Key.ToString("yyyy-MM-dd") : g.Key.ToString("yyyy-MM"),
+                year = g.Key.Year,
+                month = g.Key.Month,
+                day = byDay ? g.Key.Day : 0,
+                active = g.Count(r => !r.Revoked && r.NotAfter > soonCutoff),
+                expiringSoon = g.Count(r => !r.Revoked && r.NotAfter >= now && r.NotAfter <= soonCutoff),
+                expired = g.Count(r => !r.Revoked && r.NotAfter < now),
+                revoked = g.Count(r => r.Revoked),
+                total = g.Count()
+            })
+            .OrderBy(b => b.period)
+            .ToList();
+
+        return Ok(new
+        {
+            granularity = byDay ? "day" : "month",
+            buckets,
+            totals = new
+            {
+                active = buckets.Sum(b => b.active),
+                expiringSoon = buckets.Sum(b => b.expiringSoon),
+                expired = buckets.Sum(b => b.expired),
+                revoked = buckets.Sum(b => b.revoked),
+                total = buckets.Sum(b => b.total)
+            }
         });
     }
 

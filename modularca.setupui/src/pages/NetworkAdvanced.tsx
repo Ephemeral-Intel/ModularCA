@@ -1,4 +1,5 @@
 import React from 'react';
+import { useAutoFocus } from '../hooks/useAutoFocus';
 
 export interface NetworkData {
     publicDomain: string;
@@ -38,6 +39,7 @@ function isFqdn(s: string): boolean {
 /// Includes public URL, plain-HTTP listener, mTLS, backup storage, and logging settings.
 /// </summary>
 const NetworkAdvanced: React.FC<NetworkAdvancedProps> = ({ data, onChange }) => {
+    const autoFocusRef = useAutoFocus<HTMLInputElement>();
     const publicDomainIsFqdn = isFqdn(data.publicDomain);
 
     // If the public domain stops being an FQDN (empty, IP, or cleared), mTLS can't
@@ -68,6 +70,7 @@ const NetworkAdvanced: React.FC<NetworkAdvancedProps> = ({ data, onChange }) => 
                 </p>
                 <div>
                     <input
+                        ref={autoFocusRef}
                         id="publicDomain"
                         type="text"
                         value={data.publicDomain}

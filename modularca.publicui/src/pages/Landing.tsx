@@ -1,5 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { apiGet } from '../api/client';
 
 const cards = [
     {
@@ -15,12 +16,6 @@ const cards = [
         icon: '\u2716',
     },
     {
-        title: 'Certificate Search',
-        description: 'Look up certificates by serial number or subject name.',
-        path: '/search',
-        icon: '\u2315',
-    },
-    {
         title: 'ACME Directory',
         description: 'Automated certificate management via the ACME protocol.',
         path: '/acme',
@@ -28,7 +23,16 @@ const cards = [
     },
 ];
 
-const Landing: React.FC = () => (
+const Landing: React.FC = () => {
+    const [protocols, setProtocols] = useState<string[]>([]);
+
+    useEffect(() => {
+        apiGet<{ enabledProtocols?: string[] }>('/api/v1/public/info')
+            .then((info) => setProtocols(info?.enabledProtocols ?? []))
+            .catch(() => { /* non-blocking — just hide the section on failure */ });
+    }, []);
+
+    return (
     <div className="space-y-12">
         {/* Hero */}
         <div className="text-center py-12">
@@ -62,18 +66,21 @@ const Landing: React.FC = () => (
             ))}
         </div>
 
-        {/* Protocol info */}
-        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-6">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Supported Protocols</h2>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                {['ACME', 'EST', 'SCEP', 'CMP', 'OCSP'].map((p) => (
-                    <div key={p} className="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 text-center">
-                        <span className="text-sm font-mono font-semibold text-blue-800 dark:text-blue-400">{p}</span>
-                    </div>
-                ))}
+        {/* Supported Protocols — only the ones actually enabled on this deployment */}
+        {protocols.length > 0 && (
+            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-6">
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Supported Protocols</h2>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                    {protocols.map((p) => (
+                        <div key={p} className="bg-gray-50 dark:bg-gray-900 rounded-lg p-3 text-center">
+                            <span className="text-sm font-mono font-semibold text-blue-800 dark:text-blue-400">{p}</span>
+                        </div>
+                    ))}
+                </div>
             </div>
-        </div>
+        )}
     </div>
-);
+    );
+};
 
 export default Landing;

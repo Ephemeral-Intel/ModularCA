@@ -43,6 +43,12 @@ public class MfaStepUpController : ControllerBase
     private readonly ICurrentUserService _currentUser;
     private readonly IAuditService _audit;
     private readonly IFido2? _fido2;
+
+    // FIDO2 assertion responses must be deserialized with plain web JSON defaults, not the app's
+    // MVC options: the global JsonStringEnumConverter (StartModularCA) outranks the FIDO2 types'
+    // own [JsonConverter] attributes and fails to read "type":"public-key". See WebAuthnController.
+    private static readonly System.Text.Json.JsonSerializerOptions Fido2JsonOptions =
+        new(System.Text.Json.JsonSerializerDefaults.Web);
     private readonly IDataProtector _protector;
     private readonly SystemConfig _config;
     private readonly ISecurityPolicyService _securityPolicy;
@@ -197,7 +203,10 @@ public class MfaStepUpController : ControllerBase
         await _cache.SetStringAsync($"mfa-stepup:assert:{userId.Value}", options.ToJson(),
             new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(await GetWebAuthnChallengeTtlSecondsAsync()) });
 
-        return Ok(options);
+        // Return the FIDO2 library's own JSON rather than Ok(options): the global
+        // JsonStringEnumConverter would stringify the WebAuthn enums (alg/type) into values
+        // the browser rejects with NotSupportedError. See WebAuthnController for detail.
+        return Content(options.ToJson(), "application/json");
     }
 
     /// <summary>
@@ -207,7 +216,7 @@ public class MfaStepUpController : ControllerBase
     /// window (default 90 s).
     /// </summary>
     [HttpPost("verify-stepup/webauthn")]
-    public async Task<IActionResult> VerifyStepUpWebAuthn([FromBody] StepUpWebAuthnRequest request)
+    public async Task<IActionResult> VerifyStepUpWebAuthn()
     {
         var userId = _currentUser.UserId;
         if (userId == null)
@@ -215,6 +224,22 @@ public class MfaStepUpController : ControllerBase
 
         if (_fido2 == null)
             return BadRequest(new { error = "WebAuthn is not enabled" });
+
+        // Parse manually (see Fido2JsonOptions) rather than via [FromBody] so the nested
+        // assertion response's "type":"public-key" deserializes instead of failing model binding.
+        StepUpWebAuthnRequest? request;
+        try
+        {
+            using var reader = new System.IO.StreamReader(Request.Body, System.Text.Encoding.UTF8);
+            var body = await reader.ReadToEndAsync();
+            request = System.Text.Json.JsonSerializer.Deserialize<StepUpWebAuthnRequest>(body, Fido2JsonOptions);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return BadRequest(new { error = "Malformed assertion response." });
+        }
+        if (request is null)
+            return BadRequest(new { error = "Assertion response is required." });
 
         if (string.IsNullOrWhiteSpace(request.Operation))
             return BadRequest(new { error = "Operation is required" });

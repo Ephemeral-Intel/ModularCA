@@ -6,6 +6,7 @@ using ModularCA.Database;
 using ModularCA.Shared.Authorization;
 using ModularCA.Shared.Entities;
 using ModularCA.Shared.Enums;
+using ModularCA.Auth.Authorization;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Shared.Interfaces;
 
@@ -20,11 +21,13 @@ namespace ModularCA.API.Controllers.v1.Admin;
 public class AdminUserGrantController(
     ModularCADbContext db,
     ICurrentUserService currentUser,
-    IAuditService audit) : ControllerBase
+    IAuditService audit,
+    IControlledUserCeremonyService controlledUserSvc) : ControllerBase
 {
     private readonly ModularCADbContext _db = db;
     private readonly ICurrentUserService _currentUser = currentUser;
     private readonly IAuditService _audit = audit;
+    private readonly IControlledUserCeremonyService _controlledUserSvc = controlledUserSvc;
 
     /// <summary>
     /// Lists user capability grants, optionally filtered by user ID.
@@ -98,6 +101,35 @@ public class AdminUserGrantController(
         if (existingCount >= 1000)
             return BadRequest(new { error = "Maximum of 1000 direct capability grants per user reached." });
 
+        // Controlled-user gate: granting a privilege-controlled capability (e.g. system.manage)
+        // promotes a controlled user. A system-super applies it directly (falls through); any
+        // other actor must route it through a ControlledUserChange ceremony approved by a quorum
+        // that dominates the affected tier.
+        var minted = _controlledUserSvc.ClassifyCapabilityGrant(request.Capability, request.CertificateAuthorityId);
+        if (minted != null && _currentUser.User != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id))
+        {
+            if (!await _controlledUserSvc.CanInitiateAsync(_currentUser.User.Id, minted.Value))
+                return StatusCode(403, new { error = "You cannot grant a privilege above your own tier. A higher-tier admin must initiate this." });
+
+            var targetUsername = await _db.Users
+                .Where(u => u.Id == request.UserId)
+                .Select(u => u.Username)
+                .FirstOrDefaultAsync();
+
+            var ceremonyId = await _controlledUserSvc.InitiateCapabilityGrantAsync(
+                request.UserId, targetUsername, request.Capability,
+                request.TenantId, request.CertificateAuthorityId, request.ResourceType, request.ResourceId,
+                minted.Value, _currentUser.User.Id, _currentUser.User.Username ?? string.Empty);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                requiresCeremony = true,
+                message = "This grant promotes a controlled user and requires a controlled-user ceremony. "
+                          + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+            });
+        }
+
         var grant = new UserCapabilityGrantEntity
         {
             UserId = request.UserId,
@@ -145,6 +177,40 @@ public class AdminUserGrantController(
         var grant = await _db.UserCapabilityGrants.FindAsync(id);
         if (grant == null)
             return NotFound(new { error = $"User grant with ID {id} not found" });
+
+        // Controlled-user gate (demote): revoking a controlled capability demotes a controlled
+        // user — non-super must route it through a ceremony, and we hard-refuse removing the last
+        // dominating controlled user of the scope.
+        var demoteTier = _controlledUserSvc.ClassifyCapabilityGrant(grant.Capability, grant.CertificateAuthorityId);
+        if (demoteTier != null && _currentUser.User != null && !await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id))
+        {
+            if (await _controlledUserSvc.CountDominatingControlledUsersAsync(demoteTier.Value, grant.UserId) == 0)
+                return BadRequest(new { error = "Refusing to remove the last controlled user of this scope." });
+            if (!await _controlledUserSvc.CanInitiateAsync(_currentUser.User.Id, demoteTier.Value))
+                return StatusCode(403, new { error = "You cannot demote a privilege above your own tier." });
+
+            var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                new Shared.Models.ControlledUserChangeParameters
+                {
+                    ChangeType = "RevokeCapability",
+                    TargetUserId = grant.UserId,
+                    RecordId = grant.Id,
+                    Capability = grant.Capability,
+                    TenantId = grant.TenantId,
+                    CertificateAuthorityId = grant.CertificateAuthorityId,
+                },
+                demoteTier.Value,
+                _currentUser.User.Id,
+                _currentUser.User.Username ?? string.Empty);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                requiresCeremony = true,
+                message = "Revoking this grant demotes a controlled user and requires a controlled-user ceremony. "
+                          + "Approve via /api/v1/admin/ceremonies/" + ceremonyId + "/approve."
+            });
+        }
 
         _db.UserCapabilityGrants.Remove(grant);
         await _db.SaveChangesAsync();

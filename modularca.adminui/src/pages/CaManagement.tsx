@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { apiGet, apiPost, apiPut, apiDelete, apiPostWithMfa } from '../api/client';
+import { apiGet, apiPost, apiDelete, apiPostWithMfa } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
@@ -16,11 +16,6 @@ function caTypeBadge(ca: any): { status: 'active' | 'pending' | 'disabled'; labe
     if (t.includes('root')) return { status: 'active', label: 'Root' };
     if (t.includes('intermediate')) return { status: 'pending', label: 'Intermediate' };
     return { status: 'disabled', label: 'Issuing' };
-}
-
-interface ServiceUrls {
-    caId: string;
-    publicBaseUrl: string;
 }
 
 const CaManagement: React.FC = () => {
@@ -99,12 +94,6 @@ const CaManagement: React.FC = () => {
         setFormNameConstraintsExcluded(entries);
     };
 
-    // Service URLs state
-    const [serviceUrlsExpanded, setServiceUrlsExpanded] = useState(false);
-    const [serviceUrls, setServiceUrls] = useState<ServiceUrls[]>([]);
-    const [serviceUrlsLoading, setServiceUrlsLoading] = useState(false);
-    const [serviceUrlsSaving, setServiceUrlsSaving] = useState<string | null>(null);
-
     const flattenCas = (cas: any[]): any[] => {
         const result: any[] = [];
         for (const ca of cas) {
@@ -135,25 +124,8 @@ const CaManagement: React.FC = () => {
             });
     };
 
-    const loadServiceUrls = () => {
-        setServiceUrlsLoading(true);
-        apiGet<any>('/api/v1/admin/ca-service-urls')
-            .then((data) => {
-                const items = Array.isArray(data) ? data : (data.items || []);
-                setServiceUrls(items.map((s: any) => ({
-                    caId: s.caCertificateId || s.caId || '',
-                    publicBaseUrl: s.publicBaseUrl || '',
-                })));
-                setServiceUrlsLoading(false);
-            })
-            .catch(() => {
-                setServiceUrlsLoading(false);
-            });
-    };
-
     useEffect(() => {
         loadAuthorities();
-        loadServiceUrls();
         apiGet<any>('/api/v1/admin/tenants')
             .then(data => setTenants(Array.isArray(data) ? data : data.items || []))
             .catch(() => {});
@@ -237,26 +209,6 @@ const CaManagement: React.FC = () => {
         } finally {
             setCreateLoading(false);
         }
-    };
-
-    const handleSaveServiceUrls = async (su: ServiceUrls) => {
-        setServiceUrlsSaving(su.caId);
-        try {
-            await apiPut(`/api/v1/admin/ca-service-urls/${su.caId}`, {
-                publicBaseUrl: su.publicBaseUrl || null,
-            });
-            showToast('success', 'Public base URL saved');
-        } catch (err: any) {
-            showToast('error', err.message || 'Failed to save public base URL');
-        } finally {
-            setServiceUrlsSaving(null);
-        }
-    };
-
-    const updateServiceUrl = (caId: string, field: keyof ServiceUrls, value: string) => {
-        setServiceUrls((prev) =>
-            prev.map((s) => (s.caId === caId ? { ...s, [field]: value } : s))
-        );
     };
 
     const inputClass = 'w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500';
@@ -386,7 +338,10 @@ const CaManagement: React.FC = () => {
                                         {/* Service URLs */}
                                         {ca.serviceUrls && (
                                             <div>
-                                                <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Service URLs</span>
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Service URLs</span>
+                                                    <Link to="/distribution?tab=serviceurls" className="text-xs text-blue-500 hover:text-blue-400 underline">Edit on Distribution</Link>
+                                                </div>
                                                 <DetailField label="Public Base URL" value={ca.serviceUrls.publicBaseUrl || '(not set)'} mono />
                                                 {ca.serviceUrls.publicBaseUrl && (
                                                     <>
@@ -410,7 +365,7 @@ const CaManagement: React.FC = () => {
 
                                         {/* Quick Links */}
                                         <div className="flex gap-2 mt-1">
-                                            <Link to={`/authorities/${key}/ldap`}
+                                            <Link to={`/distribution?tab=ldap&caId=${key}`}
                                                 className="px-3 py-1 text-xs bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border border-blue-300 dark:border-blue-700 rounded hover:bg-blue-900 transition-colors inline-block">
                                                 LDAP Publishers
                                             </Link>
@@ -650,60 +605,6 @@ const CaManagement: React.FC = () => {
                 )}
             </div>
 
-            {/* Section 3: CA Service URLs */}
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                <button
-                    onClick={() => setServiceUrlsExpanded(!serviceUrlsExpanded)}
-                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
-                >
-                    <span className="text-gray-600 text-xs">{serviceUrlsExpanded ? '▼' : '▶'}</span>
-                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">CA Service URLs</h3>
-                </button>
-                {serviceUrlsExpanded && (
-                    <div className="border-t border-gray-300 dark:border-gray-700">
-                        {serviceUrlsLoading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                        {!serviceUrlsLoading && serviceUrls.length === 0 && (
-                            <div className="p-4 text-sm text-gray-600 text-center">No service URL configurations found</div>
-                        )}
-                        {!serviceUrlsLoading && serviceUrls.map((su) => {
-                            const caName = allCasFlat.find((ca) =>
-                                ca.certificateId === su.caId || ca.id === su.caId
-                            )?.name || su.caId;
-                            const saving = serviceUrlsSaving === su.caId;
-
-                            return (
-                                <div key={su.caId} className="p-4 border-b border-gray-300 dark:border-gray-700 last:border-b-0 space-y-3">
-                                    <span className="text-sm font-semibold text-gray-900 dark:text-white">{caName}</span>
-                                    <div>
-                                        <label className={labelClass}>Public Base URL</label>
-                                        <input
-                                            type="text"
-                                            value={su.publicBaseUrl}
-                                            onChange={(e) => updateServiceUrl(su.caId, 'publicBaseUrl', e.target.value)}
-                                            placeholder="http://path2.ca.example.com"
-                                            className={inputClass}
-                                        />
-                                    </div>
-                                    <p className="text-xs text-gray-600 dark:text-gray-400">
-                                        The program auto-appends <code className="mono">/crl/{'{label}'}</code>,
-                                        <code className="mono">/ocsp</code>, and <code className="mono">/ca/{'{label}'}</code>
-                                        at cert-build time. Must be plain HTTP so clients can fetch CRLs and OCSP responses
-                                        without the chicken-and-egg TLS validation problem. Leave empty to issue certs without
-                                        CDP/AIA extensions.
-                                    </p>
-                                    <button
-                                        onClick={() => handleSaveServiceUrls(su)}
-                                        disabled={saving}
-                                        className="px-4 py-1.5 text-xs font-semibold bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                                    >
-                                        {saving ? 'Saving...' : 'Save'}
-                                    </button>
-                                </div>
-                            );
-                        })}
-                    </div>
-                )}
-            </div>
         </div>
     );
 };

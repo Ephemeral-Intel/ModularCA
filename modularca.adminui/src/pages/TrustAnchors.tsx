@@ -55,7 +55,7 @@ const DetailModal: React.FC<{
                 onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between p-4 border-b border-gray-300 dark:border-gray-700">
                     <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{anchor.label || anchor.subjectDN}</h3>
-                    <button onClick={onClose} className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-900 dark:text-white text-xl">&times;</button>
+                    <button onClick={onClose} className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white text-xl">&times;</button>
                 </div>
                 <div className="p-4 space-y-1">
                     <DetailField label="Label" value={anchor.label} />

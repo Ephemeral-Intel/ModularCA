@@ -186,6 +186,13 @@ public static class AuditActionType
     /// </summary>
     public const string TenantPolicyChangeApplied = "TenantPolicyChangeApplied";
 
+    /// <summary>
+    /// Emitted when a <c>ControlledUserChange</c> ceremony executes and actually applies a
+    /// controlled user's privilege change (promote/demote/delete). Distinct from
+    /// <c>KeyCeremonyExecuted</c> so privilege-lifecycle changes have their own audit action.
+    /// </summary>
+    public const string ControlledUserChangeApplied = "ControlledUserChangeApplied";
+
     // Policy sync
     public const string PolicySyncExecuted = "PolicySyncExecuted";
     public const string PolicySyncImported = "PolicySyncImported";
