@@ -1,4 +1,5 @@
 import { globalToast } from '../context/ToastContext';
+import { createDpopProof } from './dpop';
 
 // When served from the same origin (Staging/Release), use empty base (relative paths).
 // In dev mode, use the VITE_API_URL env variable. There is no longer a hardcoded
@@ -81,9 +82,14 @@ async function refreshIfNeeded(): Promise<string | null> {
 
   inflightRefresh = (async () => {
     try {
+      // Proof-of-possession: sign a DPoP proof with the device's non-extractable key so the
+      // server can confirm this refresh comes from the device the session was bound to.
+      const refreshHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+      const proof = await createDpopProof('POST', `${API_BASE}/auth/refresh`);
+      if (proof) refreshHeaders['DPoP'] = proof;
       const resp = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: refreshHeaders,
         credentials: 'same-origin',
         body: JSON.stringify({ refreshToken }),
       });
@@ -348,6 +354,9 @@ export async function apiLogin(username: string, password: string): Promise<Logi
   if (csrf) {
     headers['X-CSRF-Token'] = csrf;
   }
+  // Bind the session to this device's PoP key when login completes without MFA.
+  const loginProof = await createDpopProof('POST', `${API_BASE}/auth/login`);
+  if (loginProof) headers['DPoP'] = loginProof;
 
   const resp = await fetch(`${API_BASE}/auth/login`, {
     method: 'POST',

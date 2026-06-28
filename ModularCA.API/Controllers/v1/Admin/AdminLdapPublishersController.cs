@@ -382,6 +382,108 @@ public class AdminLdapPublishersController(
     }
 
     /// <summary>
+    /// Applies a batch of enable/disable/delete actions across several LDAP publishers belonging to
+    /// one CA behind a SINGLE step-up token (<see cref="StepUpOps.BulkLdapPublisher"/>, bound to
+    /// <c>caId</c>), so a multi-row selection on the Distribution page prompts for MFA exactly once
+    /// instead of once per row. The tenant fence is enforced on the CA up front; each publisher row
+    /// is resolved within that CA, and rows that are missing are skipped (not failed). The batch
+    /// never aborts on a single error; a per-id summary is returned.
+    /// </summary>
+    [HttpPost("bulk")]
+    [RequireStepUp(StepUpOps.BulkLdapPublisher, "caId")]
+    public async Task<IActionResult> BulkUpdate(Guid caId, [FromBody] BulkLdapPublisherRequest request)
+    {
+        await currentUser.EnsureLoadedAsync();
+
+        if (request?.Actions == null || request.Actions.Count == 0)
+            return BadRequest(new { error = "At least one action is required." });
+
+        var resolvedTenantId = await ResolveAndFenceCaAsync(caId);
+        if (resolvedTenantId == null)
+        {
+            await audit.LogAsync(
+                AuditActionType.LdapPublisherUpdated,
+                currentUser.User?.Id, currentUser.User?.Username,
+                "LdapConfiguration", null,
+                new { CaId = caId, Reason = "ca-not-found-or-cross-tenant", Bulk = true },
+                HttpContext.Connection.RemoteIpAddress?.ToString(),
+                success: false,
+                errorMessage: "Certificate authority not found or outside accessible tenants.",
+                certificateAuthorityId: caId);
+            return NotFound(new { error = "Certificate authority not found." });
+        }
+
+        var results = new List<object>();
+        int ok = 0, skipped = 0, failed = 0;
+
+        foreach (var action in request.Actions)
+        {
+            var id = action.Id;
+            var verb = (action.Action ?? string.Empty).Trim().ToLowerInvariant();
+
+            if (verb != "enable" && verb != "disable" && verb != "delete")
+            {
+                results.Add(new { id, status = "invalid_action" });
+                skipped++;
+                continue;
+            }
+
+            var entity = await dbContext.LdapConfigurations
+                .FirstOrDefaultAsync(c => c.Id == id && c.CertificateAuthorityId == caId);
+            if (entity == null)
+            {
+                results.Add(new { id, status = "not_found" });
+                skipped++;
+                continue;
+            }
+
+            try
+            {
+                if (verb == "delete")
+                {
+                    var deletedSnapshot = new { entity.Id, entity.Name, entity.Host, entity.Port, entity.BaseDn, entity.Enabled, CaId = caId };
+                    dbContext.LdapConfigurations.Remove(entity);
+                    await dbContext.SaveChangesAsync();
+
+                    await audit.LogAsync(
+                        AuditActionType.LdapPublisherDeleted,
+                        currentUser.User?.Id, currentUser.User?.Username,
+                        "LdapConfiguration", id.ToString(),
+                        new { Bulk = true, Deleted = deletedSnapshot },
+                        HttpContext.Connection.RemoteIpAddress?.ToString(),
+                        certificateAuthorityId: caId,
+                        tenantId: resolvedTenantId);
+                }
+                else
+                {
+                    var enabled = verb == "enable";
+                    entity.Enabled = enabled;
+                    await dbContext.SaveChangesAsync();
+
+                    await audit.LogAsync(
+                        AuditActionType.LdapPublisherUpdated,
+                        currentUser.User?.Id, currentUser.User?.Username,
+                        "LdapConfiguration", id.ToString(),
+                        new { CaId = caId, Bulk = true, Enabled = enabled },
+                        HttpContext.Connection.RemoteIpAddress?.ToString(),
+                        certificateAuthorityId: caId,
+                        tenantId: resolvedTenantId);
+                }
+
+                results.Add(new { id, status = "ok" });
+                ok++;
+            }
+            catch (Exception ex)
+            {
+                results.Add(new { id, status = "failed", error = ex.Message });
+                failed++;
+            }
+        }
+
+        return Ok(new { ok, skipped, failed, results });
+    }
+
+    /// <summary>
     /// Tests the LDAP connection for the specified publisher configuration. Enforces the
     /// tenant fence on the owning CA so callers cannot probe directories belonging to
     /// other tenants.
@@ -492,4 +594,21 @@ public class UpdateLdapPublisherRequest
     public string? UpdateInterval { get; set; }
 
     public bool? Enabled { get; set; }
+}
+
+/// <summary>Request body for the bulk LDAP publisher action endpoint.</summary>
+public class BulkLdapPublisherRequest
+{
+    /// <summary>The set of per-publisher actions to apply in this batch (all within the route's CA).</summary>
+    public List<BulkLdapPublisherAction> Actions { get; set; } = new();
+}
+
+/// <summary>A single publisher action within a bulk LDAP request.</summary>
+public class BulkLdapPublisherAction
+{
+    /// <summary>The LDAP publisher configuration id.</summary>
+    public Guid Id { get; set; }
+
+    /// <summary>One of <c>enable</c>, <c>disable</c>, or <c>delete</c> (case-insensitive).</summary>
+    public string Action { get; set; } = string.Empty;
 }

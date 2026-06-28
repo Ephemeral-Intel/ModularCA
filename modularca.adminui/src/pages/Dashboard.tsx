@@ -265,9 +265,12 @@ const Dashboard: React.FC = () => {
         apiGet<any>('/api/v1/admin/requests')
             .then((data) => {
                 const items: any[] = Array.isArray(data) ? data : (data.items || []);
+                // "Pending" = awaiting approval; matches the Certificate Requests page's Pending bucket
+                // (pending / pendingapproval / partiallyapproved / null), excluding issued ones.
                 const pending = items.filter((csr: any) => {
-                    const effectiveStatus = csr.issuedCertificateId ? 'Issued' : (csr.status || 'Pending');
-                    return effectiveStatus.toLowerCase() === 'pending' || effectiveStatus.toLowerCase() === 'pendingapproval';
+                    if (csr.issuedCertificateId) return false;
+                    const s = (csr.status || '').toLowerCase();
+                    return s === '' || s === 'pending' || s === 'pendingapproval' || s === 'partiallyapproved';
                 });
                 setPendingCount(pending.length);
                 setPendingLoading(false);
@@ -526,7 +529,18 @@ const Dashboard: React.FC = () => {
                 {/* Pending CSRs */}
                 <DataCard
                     title="Pending Certificate Requests"
-                    fetchData={() => apiGet<any[]>('/api/v1/admin/requests')}
+                    fetchData={async () => {
+                        // /admin/requests returns ALL requests; this card must show only the ones
+                        // awaiting approval, otherwise issued/approved requests appear under a "pending"
+                        // badge (and look like they're all still pending).
+                        const data = await apiGet<any>('/api/v1/admin/requests');
+                        const items: any[] = Array.isArray(data) ? data : (data?.items || []);
+                        return items.filter((csr: any) => {
+                            if (csr.issuedCertificateId) return false;
+                            const s = (csr.status || '').toLowerCase();
+                            return s === '' || s === 'pending' || s === 'pendingapproval' || s === 'partiallyapproved';
+                        });
+                    }}
                     keyExtractor={(csr: any) => csr.requestId || csr.id}
                     maxItems={5}
                     emptyMessage="No pending requests"

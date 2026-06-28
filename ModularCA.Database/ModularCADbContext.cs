@@ -1,4 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.Logging;
 using ModularCA.Shared.Entities;
 using ModularCA.Shared.Interfaces;
 
@@ -183,11 +185,16 @@ public class ModularCADbContext : DbContext
     /// <summary>Persistent CMP transaction/nonce state for replay protection + certConf correlation.</summary>
     public DbSet<CmpTransactionEntity> CmpTransactions { get; set; }
 
+    /// <summary>Per-user UI preferences (table column layouts, etc.), keyed by user + namespaced key.</summary>
+    public DbSet<UserPreferenceEntity> UserPreferences { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
         modelBuilder.Entity<CrlEntity>().HasIndex(c => new { c.IssuerName, c.CrlNumber }).IsUnique();
+        // One preference row per (user, key); ValueJson holds an opaque client-owned blob.
+        modelBuilder.Entity<UserPreferenceEntity>().HasIndex(p => new { p.UserId, p.Key }).IsUnique();
         modelBuilder.Entity<LdapConfigurationEntity>(entity =>
         {
             entity.HasIndex(s => s.Name).IsUnique();
@@ -931,5 +938,95 @@ public class ModularCADbContext : DbContext
             entity.HasIndex(e => e.CmpReferenceValue);
         });
 
+    }
+
+    // ===========================================================================================
+    // TEMPORARY DIAGNOSTIC (CERT-FK-DIAG): trace the source of CA / signing-profile FK corruption.
+    //
+    // Background: CertificateAuthorities.CertificateId and SigningProfiles.IssuerId are both
+    // OnDelete(SetNull) FKs onto Certificates. Deleting a CA's certificate row therefore silently
+    // nulls the CA's cert link AND its signing profile's issuer link, orphaning the CA (no cert, no
+    // signing profile resolvable via IssuerId == CertificateId). We could not find the offending
+    // delete by static analysis, so this trap logs — with a full stack trace — every mutation that
+    // can produce that state, the moment it is about to hit the database. Remove once the culprit
+    // is identified.
+    // ===========================================================================================
+
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        LogCertFkCorruptionDiagnostics();
+        return base.SaveChanges(acceptAllChangesOnSuccess);
+    }
+
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        LogCertFkCorruptionDiagnostics();
+        return base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    /// <summary>
+    /// CERT-FK-DIAG: scans the change tracker for the three mutations that corrupt a CA's identity
+    /// — (1) a Certificate row being deleted (cascades SET NULL onto any referencing CA / signing
+    /// profile), (2) CertificateAuthorities.CertificateId being set to null, (3) SigningProfiles.IssuerId
+    /// being set to null — and logs each with the originating stack trace. Wrapped in try/catch so a
+    /// diagnostic failure can never break a real persistence operation.
+    /// </summary>
+    private void LogCertFkCorruptionDiagnostics()
+    {
+        try
+        {
+            var logger = this.GetService<ILoggerFactory>()
+                ?.CreateLogger("ModularCA.Database.CertFkDiagnostics");
+            if (logger == null)
+                return;
+
+            foreach (var entry in ChangeTracker.Entries<CertificateEntity>())
+            {
+                if (entry.State != EntityState.Deleted)
+                    continue;
+                var c = entry.Entity;
+                logger.LogWarning(
+                    "[CERT-FK-DIAG] Certificate being DELETED — CertificateId={CertId} Serial={Serial} Subject={Subject} IsCA={IsCA}. " +
+                    "This SET NULLs any CertificateAuthorities.CertificateId / SigningProfiles.IssuerId referencing it.\nOrigin stack:\n{Stack}",
+                    c.CertificateId, c.SerialNumber, c.SubjectDN, c.IsCA, Environment.StackTrace);
+            }
+
+            foreach (var entry in ChangeTracker.Entries<CertificateAuthorityEntity>())
+            {
+                if (entry.State != EntityState.Modified)
+                    continue;
+                var prop = entry.Property(nameof(CertificateAuthorityEntity.CertificateId));
+                if (prop.IsModified && prop.CurrentValue == null && prop.OriginalValue != null)
+                {
+                    logger.LogWarning(
+                        "[CERT-FK-DIAG] CertificateAuthority.CertificateId being NULLED — CaId={CaId} Name={Name} previousCertId={Old}.\nOrigin stack:\n{Stack}",
+                        entry.Entity.Id, entry.Entity.Name, prop.OriginalValue, Environment.StackTrace);
+                }
+            }
+
+            foreach (var entry in ChangeTracker.Entries<SigningProfileEntity>())
+            {
+                if (entry.State == EntityState.Deleted)
+                {
+                    logger.LogWarning(
+                        "[CERT-FK-DIAG] SigningProfile being DELETED — ProfileId={Pid} Name={Name} IssuerId={Issuer}.\nOrigin stack:\n{Stack}",
+                        entry.Entity.Id, entry.Entity.Name, entry.Entity.IssuerId, Environment.StackTrace);
+                    continue;
+                }
+                if (entry.State != EntityState.Modified)
+                    continue;
+                var prop = entry.Property(nameof(SigningProfileEntity.IssuerId));
+                if (prop.IsModified && prop.CurrentValue == null && prop.OriginalValue != null)
+                {
+                    logger.LogWarning(
+                        "[CERT-FK-DIAG] SigningProfile.IssuerId being NULLED — ProfileId={Pid} Name={Name} previousIssuerId={Old}.\nOrigin stack:\n{Stack}",
+                        entry.Entity.Id, entry.Entity.Name, prop.OriginalValue, Environment.StackTrace);
+                }
+            }
+        }
+        catch
+        {
+            // A diagnostic must never break a real save.
+        }
     }
 }

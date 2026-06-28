@@ -60,10 +60,20 @@ public class ControlledUserCeremonyService(
             return new ControlledTier(ControlledTierLevel.SystemSuper, null);
         if (group.IsSystemGroup)
             return new ControlledTier(ControlledTierLevel.SystemAdmin, null);
-        if (group.CertificateAuthorityId != null
-            && string.Equals(group.TemplateName, "Administrator", StringComparison.OrdinalIgnoreCase))
-            return new ControlledTier(ControlledTierLevel.CaAdmin, group.CertificateAuthorityId);
-        // Operator groups become controlled in a later stage.
+
+        var isAdmin = string.Equals(group.TemplateName, "Administrator", StringComparison.OrdinalIgnoreCase);
+        var isOperator = string.Equals(group.TemplateName, "Operator", StringComparison.OrdinalIgnoreCase);
+
+        if (group.CertificateAuthorityId != null)
+            // CA-scoped admin group → CA-admin tier; carry the tenant so an org admin can dominate it.
+            // (CA operator groups remain uncontrolled.)
+            return isAdmin
+                ? new ControlledTier(ControlledTierLevel.CaAdmin, group.CertificateAuthorityId) { TenantId = group.TenantId }
+                : null;
+
+        // Tenant-wide (org) controlled groups.
+        if (isAdmin) return new ControlledTier(ControlledTierLevel.OrgAdmin, null) { TenantId = group.TenantId };
+        if (isOperator) return new ControlledTier(ControlledTierLevel.OrgOperator, null) { TenantId = group.TenantId };
         return null;
     }
 
@@ -91,6 +101,7 @@ public class ControlledUserCeremonyService(
                 m.Group.IsSystemTierSuper,
                 m.Group.TemplateName,
                 m.Group.CertificateAuthorityId,
+                m.Group.TenantId,
             })
             .ToListAsync();
 
@@ -99,13 +110,21 @@ public class ControlledUserCeremonyService(
             tiers.Add(new ControlledTier(ControlledTierLevel.SystemSuper, null));
         if (groups.Any(g => g.IsSystemGroup && !g.IsSystemTierSuper))
             tiers.Add(new ControlledTier(ControlledTierLevel.SystemAdmin, null));
-        foreach (var g in groups.Where(g => !g.IsSystemGroup
-                     && g.CertificateAuthorityId != null
-                     && string.Equals(g.TemplateName, "Administrator", StringComparison.OrdinalIgnoreCase)))
+        foreach (var g in groups.Where(g => !g.IsSystemGroup))
         {
-            tiers.Add(new ControlledTier(ControlledTierLevel.CaAdmin, g.CertificateAuthorityId));
+            var isAdmin = string.Equals(g.TemplateName, "Administrator", StringComparison.OrdinalIgnoreCase);
+            var isOperator = string.Equals(g.TemplateName, "Operator", StringComparison.OrdinalIgnoreCase);
+            if (g.CertificateAuthorityId != null)
+            {
+                if (isAdmin)
+                    tiers.Add(new ControlledTier(ControlledTierLevel.CaAdmin, g.CertificateAuthorityId) { TenantId = g.TenantId });
+                // CA operators are not a controlled tier.
+            }
+            else if (isAdmin)
+                tiers.Add(new ControlledTier(ControlledTierLevel.OrgAdmin, null) { TenantId = g.TenantId });
+            else if (isOperator)
+                tiers.Add(new ControlledTier(ControlledTierLevel.OrgOperator, null) { TenantId = g.TenantId });
         }
-        // Operator tiers are added in a later stage (TemplateName == "Operator").
         return tiers;
     }
 
@@ -120,11 +139,28 @@ public class ControlledUserCeremonyService(
         if (tiers.Any(t => t.Level == ControlledTierLevel.SystemAdmin))
             return new ControlledTier(ControlledTierLevel.SystemAdmin, null);
 
-        var caIds = tiers.Where(t => t.Level == ControlledTierLevel.CaAdmin).Select(t => t.CaId).Distinct().ToList();
+        // Highest controlled tier wins, escalating to system when it spans multiple scopes
+        // (cross-org / cross-CA needs a system-tier approver).
+        var orgAdminTenants = tiers.Where(t => t.Level == ControlledTierLevel.OrgAdmin).Select(t => t.TenantId).Distinct().ToList();
+        if (orgAdminTenants.Count == 1)
+            return new ControlledTier(ControlledTierLevel.OrgAdmin, null) { TenantId = orgAdminTenants[0] };
+        if (orgAdminTenants.Count > 1)
+            return new ControlledTier(ControlledTierLevel.SystemAdmin, null);
+
+        var caTiers = tiers.Where(t => t.Level == ControlledTierLevel.CaAdmin).ToList();
+        var caIds = caTiers.Select(t => t.CaId).Distinct().ToList();
         if (caIds.Count == 1)
-            return new ControlledTier(ControlledTierLevel.CaAdmin, caIds[0]);
+        {
+            var ct = caTiers[0];
+            return new ControlledTier(ControlledTierLevel.CaAdmin, ct.CaId) { TenantId = ct.TenantId };
+        }
         if (caIds.Count > 1)
-            // Multiple CAs — only a system-tier approver dominates across CAs.
+            return new ControlledTier(ControlledTierLevel.SystemAdmin, null);
+
+        var orgOpTenants = tiers.Where(t => t.Level == ControlledTierLevel.OrgOperator).Select(t => t.TenantId).Distinct().ToList();
+        if (orgOpTenants.Count == 1)
+            return new ControlledTier(ControlledTierLevel.OrgOperator, null) { TenantId = orgOpTenants[0] };
+        if (orgOpTenants.Count > 1)
             return new ControlledTier(ControlledTierLevel.SystemAdmin, null);
 
         return null;
@@ -142,13 +178,36 @@ public class ControlledUserCeremonyService(
         // For a CA-scoped change, that CA's Administrator-group members also dominate.
         if (minted.CaId != null)
         {
-            var caAdmins = await db.CaGroupMembers
+            foreach (var u in await db.CaGroupMembers
                 .Where(m => !m.Group.IsSystemGroup
                     && m.Group.CertificateAuthorityId == minted.CaId
                     && m.Group.TemplateName == "Administrator")
-                .Select(m => m.UserId)
-                .ToListAsync();
-            foreach (var u in caAdmins) dominators.Add(u);
+                .Select(m => m.UserId).ToListAsync())
+                dominators.Add(u);
+        }
+
+        // Org admins of the affected tenant dominate org- and CA-scoped changes within their org.
+        if (minted.TenantId is Guid tid)
+        {
+            foreach (var u in await db.CaGroupMembers
+                .Where(m => !m.Group.IsSystemGroup
+                    && m.Group.CertificateAuthorityId == null
+                    && m.Group.TenantId == tid
+                    && m.Group.TemplateName == "Administrator")
+                .Select(m => m.UserId).ToListAsync())
+                dominators.Add(u);
+
+            // For an org-operator change, same-org operators also dominate.
+            if (minted.CaId == null && minted.Level == ControlledTierLevel.OrgOperator)
+            {
+                foreach (var u in await db.CaGroupMembers
+                    .Where(m => !m.Group.IsSystemGroup
+                        && m.Group.CertificateAuthorityId == null
+                        && m.Group.TenantId == tid
+                        && m.Group.TemplateName == "Operator")
+                    .Select(m => m.UserId).ToListAsync())
+                    dominators.Add(u);
+            }
         }
 
         dominators.Remove(excludeUserId);
@@ -171,7 +230,7 @@ public class ControlledUserCeremonyService(
         // The user being promoted/demoted can't approve their own privilege change.
         if (approverUserId == p.TargetUserId) return false;
 
-        var minted = new ControlledTier((ControlledTierLevel)p.MintedTierLevel, p.MintedTierCaId);
+        var minted = new ControlledTier((ControlledTierLevel)p.MintedTierLevel, p.MintedTierCaId) { TenantId = p.MintedTierTenantId };
         var tiers = await GetUserTiersAsync(approverUserId);
         return tiers.Any(t => t.Dominates(minted));
     }
@@ -213,6 +272,7 @@ public class ControlledUserCeremonyService(
         // The minted tier is authoritative for later approver-dominance checks.
         parameters.MintedTierLevel = (int)minted.Level;
         parameters.MintedTierCaId = minted.CaId;
+        parameters.MintedTierTenantId = minted.TenantId;
 
         var quorum = await ResolveUserQuorumAsync(minted);
 
@@ -409,32 +469,54 @@ public class ControlledUserCeremonyService(
     }
 
     /// <summary>
-    /// Resolves the user quorum for a change at <paramref name="minted"/>: a CA-scoped change
-    /// prefers the owning tenant's override, falling back to the system-level
-    /// <c>SecurityPolicy.UserQuorum</c>. Clamped to a minimum of 1.
+    /// Resolves the user quorum for a change at <paramref name="minted"/>. Scopes are independent —
+    /// System does NOT cascade to tenants, and parents are <i>ceilings</i>, not floors:
+    /// <list type="bullet">
+    /// <item>System-tier change (system admin/super) → <c>SecurityPolicy.UserQuorum</c> (standalone).</item>
+    /// <item>CA-scoped change → the CA's override if set, capped at its tenant's quorum (a CA may
+    /// require fewer approvals than its tenant, never more); otherwise the tenant's quorum.</item>
+    /// <item>Org-scoped change (org admin/operator) → the affected tenant's quorum.</item>
+    /// </list>
+    /// Clamped to a minimum of 1.
     /// </summary>
     private async Task<int> ResolveUserQuorumAsync(ControlledTier minted)
     {
-        var systemQuorum = (await db.Set<SecurityPolicyEntity>().AsNoTracking().FirstOrDefaultAsync())?.UserQuorum ?? 1;
-
+        // CA-scoped change: CA override (bounded above by its tenant) → else the tenant's quorum.
         if (minted.CaId != null)
         {
-            var tenantId = await db.CertificateAuthorities
+            var ca = await db.CertificateAuthorities.AsNoTracking()
                 .Where(c => c.Id == minted.CaId)
-                .Select(c => (Guid?)c.TenantId)
+                .Select(c => new { c.UserCeremonyRequiredApprovals, c.TenantId })
                 .FirstOrDefaultAsync();
 
-            if (tenantId != null)
+            var tenantQuorum = 1;
+            if (ca != null)
             {
-                var tenantQuorum = await db.Tenants
-                    .Where(t => t.Id == tenantId)
+                var tq = await db.Tenants.AsNoTracking()
+                    .Where(t => t.Id == ca.TenantId)
                     .Select(t => t.UserCeremonyRequiredApprovals)
                     .FirstOrDefaultAsync();
-                if (tenantQuorum.HasValue)
-                    return Math.Max(1, tenantQuorum.Value);
+                tenantQuorum = Math.Max(1, tq ?? 1);
+
+                if (ca.UserCeremonyRequiredApprovals.HasValue)
+                    // Tenant is the ceiling: the CA can require fewer approvals, never more.
+                    return Math.Max(1, Math.Min(ca.UserCeremonyRequiredApprovals.Value, tenantQuorum));
             }
+            return tenantQuorum;
         }
 
+        // Org-scoped change (org admin/operator): the affected tenant's quorum.
+        if (minted.TenantId is Guid orgTenantId)
+        {
+            var tq = await db.Tenants.AsNoTracking()
+                .Where(t => t.Id == orgTenantId)
+                .Select(t => t.UserCeremonyRequiredApprovals)
+                .FirstOrDefaultAsync();
+            return Math.Max(1, tq ?? 1);
+        }
+
+        // System-tier change: standalone, independent of any tenant.
+        var systemQuorum = (await db.Set<SecurityPolicyEntity>().AsNoTracking().FirstOrDefaultAsync())?.UserQuorum ?? 1;
         return Math.Max(1, systemQuorum);
     }
 

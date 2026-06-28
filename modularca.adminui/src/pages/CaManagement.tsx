@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { apiGet, apiPost, apiDelete, apiPostWithMfa } from '../api/client';
+import Chevron from '../components/Chevron';
+import { apiGet, apiPostWithMfa } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { DataTable, DataTableColumn } from '../components/DataTable';
+import { caKey } from './CaDetail';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -18,6 +20,24 @@ function caTypeBadge(ca: any): { status: 'active' | 'pending' | 'disabled'; labe
     return { status: 'disabled', label: 'Issuing' };
 }
 
+/* read-only drawer for a CA row */
+const CaDrawer: React.FC<{ ca: any }> = ({ ca }) => {
+    const cert = ca.certificate;
+    return (
+        <div className="text-sm">
+            <DetailField label="Name" value={ca.name || ca.subjectDN} />
+            <DetailField label="Label" value={ca.label} mono />
+            <DetailField label="Type" value={caTypeBadge(ca).label} />
+            <DetailField label="Status" value={ca.enabled !== false ? 'Enabled' : 'Disabled'} />
+            {ca.tenantName && <DetailField label="Tenant" value={ca.tenantName} />}
+            <DetailField label="Default" value={ca.isDefault ? 'Yes' : 'No'} />
+            {cert && <DetailField label="Serial" value={cert.serialNumber} mono />}
+            {cert && <DetailField label="Not After" value={formatDate(cert.notAfter)} />}
+            <p className="text-[11px] text-gray-500 pt-3">Open the full page for certificate, protocol and service details.</p>
+        </div>
+    );
+};
+
 const CaManagement: React.FC = () => {
     const { requireStepUp } = useStepUp();
     const { showToast } = useToast();
@@ -26,7 +46,6 @@ const CaManagement: React.FC = () => {
     const [authorities, setAuthorities] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedCa, setExpandedCa] = useState<string | null>(null);
 
     // Tenant state
     const [tenants, setTenants] = useState<any[]>([]);
@@ -214,169 +233,35 @@ const CaManagement: React.FC = () => {
     const inputClass = 'w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500';
     const labelClass = 'block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1';
 
+    const caColumns: DataTableColumn<any>[] = [
+        { key: 'type', header: 'Type', defaultWidth: 130, truncate: false, exportValue: (ca) => caTypeBadge(ca).label, render: (ca) => { const b = caTypeBadge(ca); return <StatusBadge status={b.status} label={b.label} />; } },
+        { key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, flex: true, truncate: false, exportValue: (ca) => ca.name || ca.subjectDN, render: (ca) => <span className="text-gray-900 dark:text-white truncate">{ca.name || ca.subjectDN}</span> },
+        { key: 'tenant', header: 'Tenant', defaultWidth: 140, exportValue: (ca) => ca.tenantName || '', render: (ca) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{ca.tenantName || '-'}</span> },
+        { key: 'status', header: 'Status', defaultWidth: 110, truncate: false, exportValue: (ca) => (ca.enabled !== false ? 'Enabled' : 'Disabled'), render: (ca) => <StatusBadge status={ca.enabled !== false ? 'enabled' : 'disabled'} label={ca.enabled !== false ? 'Enabled' : 'Disabled'} /> },
+        { key: 'children', header: 'Children', defaultWidth: 90, exportValue: (ca) => (ca.children?.length || 0), render: (ca) => <span className="text-xs text-gray-600 dark:text-gray-400">{ca.children?.length || 0}</span> },
+        { key: 'expires', header: 'Expires', defaultWidth: 160, exportValue: (ca) => formatDate(ca.certificate?.notAfter || ca.notAfter), render: (ca) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(ca.certificate?.notAfter || ca.notAfter)}</span> },
+    ];
+
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">CA Management</h1>
 
             {/* Section 1: CA List */}
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Certificate Authorities</h3>
-                </div>
-                <div>
-                    {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                    {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-                    {!loading && !error && allCasFlat.length === 0 && (
-                        <div className="p-4 text-sm text-gray-600 text-center">No certificate authorities found</div>
-                    )}
-                    {!loading && !error && allCasFlat.map((ca) => {
-                        const key = ca.id || ca.certificateId || ca.serialNumber || ca.name;
-                        const expanded = expandedCa === key;
-                        const typeBadge = caTypeBadge(ca);
-                        const enabled = ca.enabled !== false;
-                        const childrenCount = ca.children?.length || 0;
-
-                        return (
-                            <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                                <button
-                                    onClick={() => setExpandedCa(expanded ? null : key)}
-                                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
-                                >
-                                    <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
-                                    <StatusBadge status={typeBadge.status} label={typeBadge.label} />
-                                    <span className="text-sm text-gray-900 dark:text-white truncate">{ca.name || ca.subjectDN}</span>
-                                    {ca.tenantName && (
-                                        <span className="text-xs text-gray-600 bg-gray-200 dark:bg-gray-700 px-1.5 py-0.5 rounded">{ca.tenantName}</span>
-                                    )}
-                                    <StatusBadge status={enabled ? 'enabled' : 'disabled'} label={enabled ? 'Enabled' : 'Disabled'} />
-                                    {childrenCount > 0 && (
-                                        <span className="text-xs text-gray-600">{childrenCount} child{childrenCount !== 1 ? 'ren' : ''}</span>
-                                    )}
-                                    <span className="ml-auto text-xs text-gray-600">Expires: {formatDate(ca.certificate?.notAfter || ca.notAfter)}</span>
-                                </button>
-                                {expanded && (
-                                    <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50 space-y-3">
-                                        {/* CA Info */}
-                                        <div>
-                                            <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">CA Information</span>
-                                            <DetailField label="Label" value={ca.label} mono />
-                                            {ca.tenantName && <DetailField label="Tenant" value={ca.tenantName} />}
-                                            <DetailField label="Default" value={ca.isDefault ? 'Yes' : 'No'} />
-                                            {ca.parentCaId && <DetailField label="Parent CA" value={ca.parentCaId} mono />}
-                                        </div>
-
-                                        {/* Cert Details — nested under ca.certificate from the API */}
-                                        {(() => {
-                                            const cert = ca.certificate;
-                                            if (!cert) return (
-                                                <div>
-                                                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Certificate Details</span>
-                                                    <div className="text-xs text-gray-600 mt-1">No certificate data available</div>
-                                                </div>
-                                            );
-
-                                            // Parse thumbprints JSON if present
-                                            let thumbprintDisplay = cert.thumbprints;
-                                            try {
-                                                const tp = JSON.parse(cert.thumbprints);
-                                                thumbprintDisplay = Object.entries(tp).map(([k, v]) => `${k}: ${v}`).join('\n');
-                                            } catch {}
-
-                                            // Parse key usages JSON
-                                            let keyUsages = '';
-                                            try { keyUsages = JSON.parse(cert.keyUsagesJson || '[]').join(', '); } catch {}
-
-                                            let ekuUsages = '';
-                                            try { ekuUsages = JSON.parse(cert.extendedKeyUsagesJson || '[]').join(', '); } catch {}
-
-                                            return (
-                                                <div>
-                                                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Certificate Details</span>
-                                                    <DetailField label="Subject" value={cert.subjectDN} />
-                                                    <DetailField label="Serial Number" value={cert.serialNumber} mono />
-                                                    <DetailField label="Issuer" value={cert.issuer} />
-                                                    <DetailField label="Not Before" value={formatDate(cert.notBefore)} />
-                                                    <DetailField label="Not After" value={formatDate(cert.notAfter)} />
-                                                    <DetailField label="Is CA" value={cert.isCA ? 'Yes' : 'No'} />
-                                                    <DetailField label="Revoked" value={cert.revoked ? `Yes (${cert.revocationReason})` : 'No'} />
-                                                    {keyUsages && <DetailField label="Key Usages" value={keyUsages} />}
-                                                    {ekuUsages && <DetailField label="Extended Key Usages" value={ekuUsages} />}
-                                                    <DetailField label="Thumbprints" value={thumbprintDisplay} mono />
-                                                </div>
-                                            );
-                                        })()}
-
-                                        {/* Protocol Configs */}
-                                        {ca.protocolConfigs && ca.protocolConfigs.length > 0 && (
-                                            <div>
-                                                <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Protocol Configurations</span>
-                                                <div className="mt-1 overflow-x-auto">
-                                                    <table className="w-full min-w-[600px] text-xs">
-                                                        <thead>
-                                                            <tr className="text-gray-600 border-b border-gray-300 dark:border-gray-700">
-                                                                <th className="text-left py-1 pr-4">Protocol</th>
-                                                                <th className="text-left py-1 pr-4">Enabled</th>
-                                                                <th className="text-left py-1">Profile</th>
-                                                            </tr>
-                                                        </thead>
-                                                        <tbody>
-                                                            {ca.protocolConfigs.map((pc: any, idx: number) => (
-                                                                <tr key={idx} className="border-b border-gray-300 dark:border-gray-700/50 last:border-b-0">
-                                                                    <td className="py-1 pr-4 text-gray-700 dark:text-gray-300">{pc.protocol || pc.name}</td>
-                                                                    <td className="py-1 pr-4">
-                                                                        <StatusBadge status={pc.enabled ? 'enabled' : 'disabled'} label={pc.enabled ? 'Yes' : 'No'} />
-                                                                    </td>
-                                                                    <td className="py-1 text-gray-600 dark:text-gray-400">{pc.signingProfileName || pc.signingProfile || pc.certProfile || '-'}</td>
-                                                                </tr>
-                                                            ))}
-                                                        </tbody>
-                                                    </table>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {/* Service URLs */}
-                                        {ca.serviceUrls && (
-                                            <div>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">Service URLs</span>
-                                                    <Link to="/distribution?tab=serviceurls" className="text-xs text-blue-500 hover:text-blue-400 underline">Edit on Distribution</Link>
-                                                </div>
-                                                <DetailField label="Public Base URL" value={ca.serviceUrls.publicBaseUrl || '(not set)'} mono />
-                                                {ca.serviceUrls.publicBaseUrl && (
-                                                    <>
-                                                        <DetailField label="CDP" value={`${ca.serviceUrls.publicBaseUrl}/crl/${ca.label || ca.certificate?.serialNumber || ''}`} mono />
-                                                        <DetailField label="OCSP" value={`${ca.serviceUrls.publicBaseUrl}/ocsp`} mono />
-                                                        <DetailField label="CA Issuer" value={`${ca.serviceUrls.publicBaseUrl}/ca/${ca.label || ca.certificate?.serialNumber || ''}`} mono />
-                                                    </>
-                                                )}
-                                            </div>
-                                        )}
-
-                                        {/* OCSP Responder */}
-                                        {ca.ocspResponder && (
-                                            <div>
-                                                <span className="text-xs font-semibold text-gray-600 dark:text-gray-400">OCSP Responder</span>
-                                                <DetailField label="URL" value={ca.ocspResponder.url} mono />
-                                                <DetailField label="Status" value={ca.ocspResponder.enabled ? 'Enabled' : 'Disabled'} />
-                                                <DetailField label="Signing Cert" value={ca.ocspResponder.signingCertSubject} />
-                                            </div>
-                                        )}
-
-                                        {/* Quick Links */}
-                                        <div className="flex gap-2 mt-1">
-                                            <Link to={`/distribution?tab=ldap&caId=${key}`}
-                                                className="px-3 py-1 text-xs bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border border-blue-300 dark:border-blue-700 rounded hover:bg-blue-900 transition-colors inline-block">
-                                                LDAP Publishers
-                                            </Link>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
+            <DataTable<any>
+                tableId="ca-list"
+                title="Certificate Authorities"
+                rows={allCasFlat}
+                rowKey={caKey}
+                loading={loading}
+                error={error}
+                empty="No certificate authorities found"
+                columns={caColumns}
+                selectable
+                exportFileName="certificate-authorities"
+                renderDrawer={(ca) => <CaDrawer ca={ca} />}
+                drawerTitle={(ca) => ca.name || ca.subjectDN}
+                detailPath={(ca) => `/authorities/manage/${encodeURIComponent(caKey(ca))}`}
+            />
 
             {/* Section 2: Create Intermediate CA */}
             <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
@@ -384,7 +269,7 @@ const CaManagement: React.FC = () => {
                     onClick={() => setCreateExpanded(!createExpanded)}
                     className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
                 >
-                    <span className="text-gray-600 text-xs">{createExpanded ? '▼' : '▶'}</span>
+                    <span className="text-gray-600 text-xs"><Chevron open={createExpanded} className="w-3 h-3" /></span>
                     <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Create Certificate Authority</h3>
                 </button>
                 {createExpanded && (

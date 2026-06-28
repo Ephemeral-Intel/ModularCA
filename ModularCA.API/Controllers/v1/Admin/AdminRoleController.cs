@@ -158,11 +158,48 @@ public class AdminRoleController(
         if (request.Description != null)
             role.Description = request.Description;
 
+        // When the request carries a full desired capability set, reconcile it in the SAME step-up-gated
+        // update — so the detail page saves the role's fields and capabilities with one MFA prompt
+        // instead of a separate add/remove call (and step-up) per capability.
+        int capsAdded = 0, capsRemoved = 0;
+        if (request.Capabilities != null)
+        {
+            foreach (var c in request.Capabilities)
+            {
+                if (string.IsNullOrWhiteSpace(c.Capability) || !Capabilities.All.Contains(c.Capability))
+                    return BadRequest(new { error = $"Unknown capability '{c.Capability}'. Must be one of: {string.Join(", ", Capabilities.All)}" });
+            }
+
+            static string Key(string cap, string? rt, Guid? rid) => $"{cap}|{rt}|{rid}";
+            var existing = await _db.RoleCapabilities.Where(rc => rc.RoleId == id).ToListAsync();
+            var desiredKeys = request.Capabilities.Select(c => Key(c.Capability, c.ResourceType, c.ResourceId)).ToHashSet();
+            var existingKeys = existing.Select(e => Key(e.Capability, e.ResourceType, e.ResourceId)).ToHashSet();
+
+            var toRemove = existing.Where(e => !desiredKeys.Contains(Key(e.Capability, e.ResourceType, e.ResourceId))).ToList();
+            _db.RoleCapabilities.RemoveRange(toRemove);
+            capsRemoved = toRemove.Count;
+
+            foreach (var c in request.Capabilities)
+            {
+                if (!existingKeys.Contains(Key(c.Capability, c.ResourceType, c.ResourceId)))
+                {
+                    _db.RoleCapabilities.Add(new RoleCapabilityEntity
+                    {
+                        RoleId = id,
+                        Capability = c.Capability,
+                        ResourceType = c.ResourceType,
+                        ResourceId = c.ResourceId,
+                    });
+                    capsAdded++;
+                }
+            }
+        }
+
         await _db.SaveChangesAsync();
 
         await _audit.LogAsync(AuditActionType.ConfigUpdated, _currentUser.User?.Id, _currentUser.User?.Username,
             "Role", role.Id.ToString(),
-            new { Action = "Updated", request.Name, request.Description },
+            new { Action = "Updated", request.Name, request.Description, CapabilitiesAdded = capsAdded, CapabilitiesRemoved = capsRemoved },
             HttpContext.Connection.RemoteIpAddress?.ToString());
 
         return Ok(new { message = $"Role {role.Name} updated" });
@@ -317,6 +354,25 @@ public class UpdateRoleRequest
 
     /// <summary>New description for the role.</summary>
     public string? Description { get; set; }
+
+    /// <summary>
+    /// When non-null, the role's capability bindings are reconciled to exactly this set in the same
+    /// step-up-gated update (add missing, remove extra). Null leaves capabilities untouched.
+    /// </summary>
+    public List<RoleCapabilityInput>? Capabilities { get; set; }
+}
+
+/// <summary>A desired capability binding for the reconcile-on-update path.</summary>
+public class RoleCapabilityInput
+{
+    /// <summary>The capability string (must be one of <see cref="Capabilities.All"/>).</summary>
+    public string Capability { get; set; } = string.Empty;
+
+    /// <summary>Optional resource type for scoped capabilities.</summary>
+    public string? ResourceType { get; set; }
+
+    /// <summary>Optional resource ID for scoped capabilities.</summary>
+    public Guid? ResourceId { get; set; }
 }
 
 /// <summary>

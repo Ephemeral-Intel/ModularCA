@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import Chevron from '../components/Chevron';
 import { Link } from 'react-router-dom';
 import { apiGet, apiPost, apiPut, apiPutWithMfa, apiPostWithMfa } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
@@ -87,7 +88,7 @@ const ReadOnlyTag = () => <span className="px-1.5 py-0.5 text-[10px] font-semibo
 
 const SectionHeader: React.FC<{ title: string; expanded: boolean; onToggle: () => void; description?: string; tag?: 'live' | 'restart' | 'read-only' }> = ({ title, expanded, onToggle, description, tag }) => (
     <button onClick={onToggle} className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors">
-        <span className="text-gray-600 text-xs">{expanded ? '\u25BC' : '\u25B6'}</span>
+        <span className="text-gray-600 text-xs"><Chevron open={expanded} className="w-3 h-3" /></span>
         <span className="text-sm font-semibold text-gray-900 dark:text-white">{title}</span>
         {description && <span className="text-xs text-gray-600 ml-2">{description}</span>}
         <span className="ml-auto">{tag === 'live' ? <LiveTag /> : tag === 'restart' ? <RestartTag /> : tag === 'read-only' ? <ReadOnlyTag /> : null}</span>

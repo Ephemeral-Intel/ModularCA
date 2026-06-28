@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Authorization;
+﻿using System.Net.Mail;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
@@ -40,6 +41,90 @@ namespace ModularCA.API.Controllers.v1.Account
             if (user == null)
                 return NotFound();
             return Ok(user);
+        }
+
+        /// <summary>
+        /// Updates the authenticated user's OWN profile. Display name, first name and last name are
+        /// updated freely. Changing the email address additionally requires a step-up MFA token
+        /// (<see cref="StepUpOps.ChangeEmail"/>) because email is an identity/recovery field. Username
+        /// is immutable here — it is the login identity and is managed by administrators only. A null
+        /// field is left unchanged; only fields that actually differ are written.
+        /// </summary>
+        [HttpPut]
+        public async Task<IActionResult> UpdateProfile([FromBody] UpdateAccountProfileRequest request,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+
+            var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == _currentUser.User.Id);
+            if (user == null)
+                return NotFound();
+
+            var changes = new List<string>();
+            var emailChanged = false;
+
+            // Email change — sensitive: require step-up MFA, then validate format + uniqueness.
+            var newEmail = request.Email?.Trim();
+            if (!string.IsNullOrEmpty(newEmail) && !string.Equals(newEmail, user.Email, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.ChangeEmail, user.Id.ToString()))
+                    return StatusCode(403, new { error = "MFA re-verification required to change your email address. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+                if (!MailAddress.TryCreate(newEmail, out _))
+                    return BadRequest(new { error = "That email address is not valid." });
+
+                var inUse = await _db.Users.AnyAsync(u => u.Id != user.Id && u.Email == newEmail);
+                if (inUse)
+                    return BadRequest(new { error = "That email address is already in use." });
+
+                user.Email = newEmail;
+                changes.Add("Email");
+                emailChanged = true;
+            }
+
+            // Low-risk profile fields — applied freely. Only a provided, actually-different value counts.
+            var newDisplay = request.DisplayName?.Trim();
+            if (request.DisplayName != null && newDisplay != user.DisplayName)
+            {
+                user.DisplayName = string.IsNullOrEmpty(newDisplay) ? null : newDisplay;
+                changes.Add("DisplayName");
+            }
+            var newFirst = request.FirstName?.Trim();
+            if (request.FirstName != null && newFirst != user.FirstName)
+            {
+                user.FirstName = newFirst ?? string.Empty;
+                changes.Add("FirstName");
+            }
+            var newLast = request.LastName?.Trim();
+            if (request.LastName != null && newLast != user.LastName)
+            {
+                user.LastName = newLast ?? string.Empty;
+                changes.Add("LastName");
+            }
+
+            if (changes.Count == 0)
+                return Ok(new { message = "No changes.", changes });
+
+            await _db.SaveChangesAsync();
+
+            await _audit.LogAsync(AuditActionType.UserUpdated, user.Id, user.Username,
+                "User", user.Id.ToString(),
+                new { Self = true, Changes = changes, EmailChanged = emailChanged },
+                HttpContext.Connection.RemoteIpAddress?.ToString());
+
+            return Ok(new
+            {
+                message = "Account updated.",
+                changes,
+                // Echo saved values so the SPA can refresh without a second round-trip.
+                user.Username,
+                user.Email,
+                user.DisplayName,
+                user.FirstName,
+                user.LastName,
+            });
         }
 
         /// <summary>
@@ -149,5 +234,18 @@ namespace ModularCA.API.Controllers.v1.Account
             });
         }
 
+    }
+
+    /// <summary>
+    /// Request body for self-service account profile updates (<c>PUT /api/v1/account</c>). Every field
+    /// is optional; a null field is left unchanged. Changing <see cref="Email"/> requires a step-up MFA
+    /// token. Username is intentionally absent — it is not self-editable.
+    /// </summary>
+    public class UpdateAccountProfileRequest
+    {
+        public string? DisplayName { get; set; }
+        public string? FirstName { get; set; }
+        public string? LastName { get; set; }
+        public string? Email { get; set; }
     }
 }

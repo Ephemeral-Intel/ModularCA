@@ -167,6 +167,65 @@ public class AdminRevocationController(
     }
 
     /// <summary>
+    /// Bulk-revokes several LEAF certificates by serial with a single shared reason, authorized by ONE
+    /// step-up token (<see cref="StepUpOps.RevokeCert"/>, batch-scoped / no target). CA certificates are
+    /// skipped (status <c>skipped_ca</c>) because they use the RevokeCa op and may be ceremony-gated —
+    /// they must be revoked individually. Already-revoked / not-found / cross-tenant entries are skipped
+    /// too. Never aborts the batch on one failure; returns a per-serial summary.
+    /// </summary>
+    [HttpPost("bulk-revoke")]
+    public async Task<IActionResult> BulkRevoke([FromBody] BulkRevokeRequest request, [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+    {
+        await _currentUser.EnsureLoadedAsync();
+        if (_currentUser.User == null) return Unauthorized();
+
+        if (request.SerialNumbers == null || request.SerialNumbers.Count == 0)
+            return BadRequest(new { error = "At least one serial number is required." });
+
+        // ONE RevokeCert token (no target) authorizes the whole leaf-cert batch.
+        if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.RevokeCert))
+            return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+        var results = new List<object>();
+        int revoked = 0, skipped = 0, failed = 0;
+
+        foreach (var serial in request.SerialNumbers.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct())
+        {
+            var cert = await _dbContext.Certificates.AsNoTracking().FirstOrDefaultAsync(c => c.SerialNumber == serial);
+            if (cert == null) { results.Add(new { serialNumber = serial, status = "not_found" }); skipped++; continue; }
+            if (cert.IsCA) { results.Add(new { serialNumber = serial, status = "skipped_ca" }); skipped++; continue; }
+            if (cert.Revoked) { results.Add(new { serialNumber = serial, status = "already_revoked" }); skipped++; continue; }
+
+            var fence = await EnforceTenantFenceForCertAsync(null, serial);
+            if (fence != null) { results.Add(new { serialNumber = serial, status = "denied" }); skipped++; continue; }
+
+            try
+            {
+                await _revocationService.RevokeCertificateAsync(null, serial, request.Reason, request.InvalidityDate);
+                var caInfo = await ResolveCaFromSerialAsync(serial);
+                await _audit.LogAsync(AuditActionType.CertificateRevoked, _currentUser.User?.Id, _currentUser.User?.Username,
+                    "Certificate", serial, new { request.Reason, Bulk = true },
+                    HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    certificateAuthorityId: caInfo?.CaId, tenantId: caInfo?.TenantId);
+                results.Add(new { serialNumber = serial, status = "revoked" });
+                revoked++;
+            }
+            catch (Exception ex)
+            {
+                await TryAuditRevocationFailureAsync(cert, null, serial, request.Reason, ex);
+                results.Add(new { serialNumber = serial, status = "failed" });
+                failed++;
+            }
+        }
+
+        if (revoked > 0)
+            _ = _alertService.RaiseAlertAsync("CertificateRevoked", AlertSeverity.Critical,
+                $"{revoked} certificate(s) bulk-revoked by {_currentUser.User?.Username}", new { Count = revoked, request.Reason });
+
+        return Ok(new { revoked, skipped, failed, results });
+    }
+
+    /// <summary>
     /// Places a certificate on hold by its ID. Requires step-up MFA verification.
     /// Audit findings #32: emits <see cref="AuditActionType.CertificateHeld"/> with
     /// <c>success=false</c> when the hold service call throws.

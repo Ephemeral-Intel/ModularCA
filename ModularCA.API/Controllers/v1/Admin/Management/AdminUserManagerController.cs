@@ -467,5 +467,99 @@ namespace ModularCA.API.Controllers.v1.Admin.Management
             return BadRequest(new { message = $"Failed to remove user {id} from group {groupId}" });
         }
 
+        /// <summary>
+        /// Bulk add/remove a user's group memberships in one step-up-gated batch. ONE
+        /// <see cref="StepUpOps.UpdateUserGroups"/> token authorizes the whole change (adds + removes),
+        /// but each group is evaluated independently with the SAME per-group logic as
+        /// <see cref="AddUserToGroup"/> / <see cref="RemoveUserFromGroup"/> — tier guard, controlled-user
+        /// gate, and the last-controlled-user guard. A privileged add/remove spawns its OWN controlled-user
+        /// ceremony, so a batch can start several ceremonies (one per privileged group) while applying
+        /// uncontrolled changes directly. Never aborts on one group's failure; returns a per-group summary.
+        /// </summary>
+        [HttpPost("{id:guid}/groups/bulk")]
+        [Authorize(Policy = "CaAdmin")]
+        public async Task<IActionResult> BulkUpdateUserGroups(Guid id, [FromBody] BulkUserGroupsRequest request,
+            [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (_currentUser.User == null) return Unauthorized();
+
+            // ONE token authorizes the whole add+remove batch.
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.UpdateUserGroups, id.ToString()))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            var user = await _dbContext.Users.FindAsync(id);
+            if (user == null) return NotFound(new { error = "User not found." });
+
+            var isSuper = await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id);
+            var results = new List<object>();
+            int added = 0, removed = 0, ceremonies = 0, skipped = 0;
+
+            // ── adds ──
+            foreach (var groupId in (request.AddGroupIds ?? new List<Guid>()).Distinct())
+            {
+                if (await AuthorizeUserGroupChangeAsync(groupId, id) != null) { results.Add(new { groupId, action = "add", status = "denied" }); skipped++; continue; }
+                var grp = await _dbContext.CaGroups.FindAsync(groupId);
+                if (grp == null) { results.Add(new { groupId, action = "add", status = "not_found" }); skipped++; continue; }
+
+                var tier = _controlledUserSvc.ClassifyGroup(grp);
+                if (tier != null && !isSuper)
+                {
+                    var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                        new ModularCA.Shared.Models.ControlledUserChangeParameters
+                        {
+                            ChangeType = "AddGroupMember", TargetUserId = id, TargetUsername = user.Username,
+                            GroupId = groupId, CertificateAuthorityId = grp.CertificateAuthorityId,
+                        },
+                        tier.Value, _currentUser.User!.Id, _currentUser.User!.Username ?? string.Empty);
+                    results.Add(new { groupId, action = "add", status = "ceremony", ceremonyId }); ceremonies++; continue;
+                }
+
+                if (await _userService.AddUserToGroup(id, groupId, _currentUser.User?.Id))
+                {
+                    await _audit.LogAsync(AuditActionType.GroupMemberAdded, _currentUser.User?.Id, _currentUser.User?.Username,
+                        "User", id.ToString(), new { GroupId = groupId, Bulk = true }, HttpContext.Connection.RemoteIpAddress?.ToString());
+                    results.Add(new { groupId, action = "add", status = "added" }); added++;
+                }
+                else { results.Add(new { groupId, action = "add", status = "failed" }); skipped++; }
+            }
+
+            // ── removes ──
+            foreach (var groupId in (request.RemoveGroupIds ?? new List<Guid>()).Distinct())
+            {
+                if (await AuthorizeUserGroupChangeAsync(groupId, id) != null) { results.Add(new { groupId, action = "remove", status = "denied" }); skipped++; continue; }
+                var grp = await _dbContext.CaGroups.FindAsync(groupId);
+                if (grp == null) { results.Add(new { groupId, action = "remove", status = "not_found" }); skipped++; continue; }
+
+                var tier = _controlledUserSvc.ClassifyGroup(grp);
+                if (tier != null && !isSuper)
+                {
+                    if (await _controlledUserSvc.CountDominatingControlledUsersAsync(tier.Value, id) == 0)
+                    { results.Add(new { groupId, action = "remove", status = "last_user" }); skipped++; continue; }
+
+                    var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                        new ModularCA.Shared.Models.ControlledUserChangeParameters
+                        {
+                            ChangeType = "RemoveGroupMember", TargetUserId = id, GroupId = groupId, CertificateAuthorityId = grp.CertificateAuthorityId,
+                        },
+                        tier.Value, _currentUser.User!.Id, _currentUser.User!.Username ?? string.Empty);
+                    results.Add(new { groupId, action = "remove", status = "ceremony", ceremonyId }); ceremonies++; continue;
+                }
+
+                if (await _userService.RemoveUserFromGroup(id, groupId))
+                {
+                    await _audit.LogAsync(AuditActionType.GroupMemberRemoved, _currentUser.User?.Id, _currentUser.User?.Username,
+                        "User", id.ToString(), new { GroupId = groupId, Bulk = true }, HttpContext.Connection.RemoteIpAddress?.ToString());
+                    results.Add(new { groupId, action = "remove", status = "removed" }); removed++;
+                }
+                else { results.Add(new { groupId, action = "remove", status = "failed" }); skipped++; }
+            }
+
+            if (added > 0 || removed > 0)
+                await TokenRevocationMiddleware.InvalidateUserStampCacheAsync(_cache, id);
+
+            return Ok(new { added, removed, ceremonies, skipped, results });
+        }
+
     }
 }

@@ -25,6 +25,9 @@ public static class StepUpOps
     // Certificate export
     public const string ExportCert = "export-cert";
 
+    // Per-certificate ACL changes (grant/change/revoke a user's view/manage access on a cert)
+    public const string UpdateCertAcl = "update-cert-acl";
+
     // User management
     public const string CreateUser = "create-user";
     public const string UpdateUser = "update-user";
@@ -33,6 +36,10 @@ public static class StepUpOps
     // Group membership
     public const string AddGroupMember = "add-group-member";
     public const string RemoveGroupMember = "remove-group-member";
+
+    // Bulk user-group edit (add + remove groups for one user in a single step-up-gated batch; each
+    // controlled change still spawns its own ceremony)
+    public const string UpdateUserGroups = "update-user-groups";
 
     // Group lifecycle (CA-scoped authorization groups)
     public const string DeleteGroup = "delete-group";
@@ -55,6 +62,10 @@ public static class StepUpOps
     public const string ResetPassword = "reset-password";
     public const string ResetMfa = "reset-mfa";
     public const string ChangePassword = "change-password";
+
+    // Self-service email change (account detail page). Email is an identity/recovery field, so a
+    // user changing their own email must re-verify with step-up MFA.
+    public const string ChangeEmail = "change-email";
 
     // Backup & restore
     public const string CreateBackup = "create-backup";
@@ -122,6 +133,14 @@ public static class StepUpOps
     public const string UpdateLdapPublisher = "update-ldap-publisher";
     public const string DeleteLdapPublisher = "delete-ldap-publisher";
 
+    // Bulk distribution-config operations (Distribution page): a single token authorizes a
+    // batch of enable/disable/delete actions across several CRL schedules or LDAP publishers,
+    // so operating on a multi-row selection prompts for step-up exactly once instead of per row.
+    // BulkCrlSchedule is batch-scoped (no target) because a selection can span CAs; BulkLdapPublisher
+    // is bound to the owning CA id because LDAP publishers are addressed under a single CA route.
+    public const string BulkCrlSchedule = "bulk-crl-schedule";
+    public const string BulkLdapPublisher = "bulk-ldap-publisher";
+
     // Certificate Transparency log catalog. CT log URL + public key are system-wide
     // artifacts — corrupting them silently breaks SCT embedding for every tenant,
     // so mutations require step-up MFA on top of the SystemOperator policy.
@@ -167,6 +186,11 @@ public static class StepUpOps
     public const string EnableTenant = "enable-tenant";
     public const string DisableTenant = "disable-tenant";
 
+    // Combined tenant-settings save (detail page): a single token authorizes one atomic update of
+    // a tenant's ceilings, per-CA issuance quotas, and tenant/CA user-approval quorums — so editing
+    // several sensitive fields at once prompts for step-up exactly once.
+    public const string UpdateTenantSettings = "update-tenant-settings";
+
     /// <summary>
     /// The canonical allow-list consulted by <c>IssueStepUpTokenAsync</c>. Any operation
     /// string not present here is rejected at issuance time with
@@ -177,13 +201,14 @@ public static class StepUpOps
         RevokeCert, HoldCert, UnholdCert,
         ReissueCert,
         ExportCert,
+        UpdateCertAcl,
         CreateUser, UpdateUser, DeleteUser,
-        AddGroupMember, RemoveGroupMember,
+        AddGroupMember, RemoveGroupMember, UpdateUserGroups,
         DeleteGroup, UpdateGroup,
         GrantUserCapability, RevokeUserCapability,
         CreateRole, UpdateRole, DeleteRole,
         AssignRole, UnassignRole,
-        ResetPassword, ResetMfa, ChangePassword,
+        ResetPassword, ResetMfa, ChangePassword, ChangeEmail,
         CreateBackup, RestoreBackup, SetBackupPassword, ChangeBackupEncryptionMode,
         CreateCa, UpdateCa, RevokeCa, CreateSshCa, DisableSshCa,
         UpdateSigningProfile, DeleteSigningProfile,
@@ -198,6 +223,7 @@ public static class StepUpOps
         UpdateSchedulerConfig,
         CreateCrlSchedule, UpdateCrlSchedule, DeleteCrlSchedule, ToggleCrlSchedule,
         CreateLdapPublisher, UpdateLdapPublisher, DeleteLdapPublisher,
+        BulkCrlSchedule, BulkLdapPublisher,
         CreateCtLog, UpdateCtLog, DeleteCtLog,
         CreateCertificateTemplate, UpdateCertificateTemplate, DeleteCertificateTemplate,
         UpdateCaServiceUrl, DeleteCaServiceUrl,
@@ -206,7 +232,7 @@ public static class StepUpOps
         TotpSetup, TotpVerifySetup, TotpRemove,
         WebAuthnRegister, WebAuthnDelete,
         MtlsEnroll, MtlsDelete,
-        EnableTenant, DisableTenant,
+        EnableTenant, DisableTenant, UpdateTenantSettings,
     };
 
     /// <summary>

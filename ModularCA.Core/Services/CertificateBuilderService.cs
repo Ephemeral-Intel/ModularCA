@@ -156,18 +156,22 @@ namespace ModularCA.Core.Services
                 usageFlags = KeyUsageFriendlyNames.ParseMany(standardOids);
             }
 
-            // When building a CA certificate, force-add keyCertSign
-            // and cRLSign so an under-specified profile cannot produce an
-            // RFC 5280 §4.2.1.3 violation (BasicConstraints.cA=TRUE without
-            // keyCertSign → any chain signed by this CA fails path validation).
+            // When building a CA certificate, always normalise in keyCertSign and cRLSign.
+            // These bits are MANDATORY on any BasicConstraints.cA=TRUE certificate (RFC 5280
+            // §4.2.1.3) — a CA cert without keyCertSign makes every chain it signs fail path
+            // validation. Adding them is therefore by-design correctness, not an error: a CA
+            // profile that simply doesn't restate the implied CA bits (or has them intersected
+            // away by restrictive profile inheritance) is still valid, and the cert is always
+            // built correctly. Logged at debug only so this expected normalisation doesn't emit
+            // a misleading warning on every single CA creation.
             if (isCa)
             {
                 var requiredCaBits = KeyUsage.KeyCertSign | KeyUsage.CrlSign;
                 var missing = requiredCaBits & ~usageFlags;
                 if (missing != 0)
                 {
-                    _logger.LogWarning(
-                        "CA profile KeyUsages omitted required CA bits; force-adding keyCertSign/cRLSign (missing mask 0x{Missing:X}).",
+                    _logger.LogDebug(
+                        "Normalising mandatory CA key usages onto CA certificate (added mask 0x{Missing:X}: keyCertSign/cRLSign per RFC 5280 §4.2.1.3).",
                         missing);
                 }
                 usageFlags |= requiredCaBits;

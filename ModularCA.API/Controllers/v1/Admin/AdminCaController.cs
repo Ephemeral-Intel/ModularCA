@@ -201,6 +201,7 @@ namespace ModularCA.API.Controllers.v1.Admin
             var caQuery = _db.CertificateAuthorities
                 .Include(ca => ca.Certificate)
                 .AsNoTracking()
+                .Where(ca => !ca.IsSshCa) // SSH CAs are managed separately via /admin/ssh — keep them out of the X.509 hierarchy
                 .AsQueryable();
 
             // Filter CAs to only those belonging to the user's accessible tenants
@@ -224,8 +225,15 @@ namespace ModularCA.API.Controllers.v1.Admin
                 .AsNoTracking()
                 .ToListAsync();
 
+            // Guard against a malformed parent chain (a ParentCaId cycle) causing unbounded
+            // recursion → StackOverflowException → 500 that would blank the entire CA tree (and with
+            // it the CA detail page and the Distribution service-URL tab, which both read this feed).
+            var visited = new HashSet<Guid>();
+
             object MapCa(Shared.Entities.CertificateAuthorityEntity ca)
             {
+                visited.Add(ca.Id);
+
                 var caProtocols = protocolConfigs
                     .Where(pc => pc.CaId == ca.Id)
                     .Select(pc => new
@@ -273,14 +281,18 @@ namespace ModularCA.API.Controllers.v1.Admin
                     {
                         urls.PublicBaseUrl,
                     } : null,
-                    // Recursively nest children
-                    Children = cas.Where(c => c.ParentCaId == ca.Id).Select(c => MapCa(c)).ToList()
+                    // Recursively nest children. Skip any already-visited CA so a cycle can't loop forever.
+                    Children = cas.Where(c => c.ParentCaId == ca.Id && !visited.Contains(c.Id)).Select(c => MapCa(c)).ToList()
                 };
             }
 
-            // Only return root CAs at the top level; children are nested
-            var roots = cas.Where(ca => ca.ParentCaId == null);
-            var result = roots.Select(ca => MapCa(ca));
+            // Top level = true roots (no parent) PLUS "orphans" whose parent is not in the visible set
+            // (e.g. filtered out by the tenant fence or the SSH-CA exclusion). Surfacing orphans here
+            // means a CA never silently disappears from the tree just because its parent isn't visible —
+            // which previously made a freshly-created sub-CA (and the apparent loss of the whole list)
+            // look like the data had vanished.
+            var roots = cas.Where(ca => ca.ParentCaId == null || !caIds.Contains(ca.ParentCaId.Value));
+            var result = roots.Select(ca => MapCa(ca)).ToList();
 
             return Ok(result);
         }

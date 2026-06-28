@@ -1,13 +1,16 @@
 namespace ModularCA.Shared.Authorization;
 
 /// <summary>
-/// Privilege tiers that a <i>controlled user</i> can hold, ordered low → high. Used to gate
-/// who may approve (or initiate) a controlled-user ceremony: an approver must <b>dominate</b>
-/// the affected privilege's tier. System tiers have no CA scope; CA tiers are scoped to one CA.
+/// Privilege tiers that a <i>controlled user</i> can hold. Used to gate who may approve (or
+/// initiate) a controlled-user ceremony: an approver must <b>dominate</b> the affected privilege's
+/// tier. System tiers have no scope; Org tiers are scoped to a tenant; CA tiers are scoped to one
+/// CA (and carry their tenant so an org admin can dominate them). New tiers are appended so the
+/// numeric values of persisted <c>MintedTierLevel</c> stay stable — dominance is explicit below,
+/// not derived from the numeric order.
 /// </summary>
 public enum ControlledTierLevel
 {
-    /// <summary>Operator-level authority (system- or CA-scoped).</summary>
+    /// <summary>Operator-level authority over a specific CA.</summary>
     Operator = 1,
 
     /// <summary>Administrator of a specific CA.</summary>
@@ -18,20 +21,35 @@ public enum ControlledTierLevel
 
     /// <summary>System-super (the bootstrap super tier). Dominates everything; mints directly.</summary>
     SystemSuper = 4,
+
+    /// <summary>Operator over a whole tenant/org (tenant-scoped, not tied to one CA).</summary>
+    OrgOperator = 5,
+
+    /// <summary>Administrator over a whole tenant/org (tenant-scoped).</summary>
+    OrgAdmin = 6,
 }
 
 /// <summary>
-/// A concrete privilege tier: a <see cref="ControlledTierLevel"/> plus, for CA-scoped tiers,
-/// the CA it applies to (<c>null</c> for system-scoped tiers).
+/// A concrete privilege tier: a <see cref="ControlledTierLevel"/> plus its scope.
+/// <list type="bullet">
+/// <item>System tiers: <c>CaId</c> and <c>TenantId</c> both null.</item>
+/// <item>Org tiers: <c>TenantId</c> set, <c>CaId</c> null.</item>
+/// <item>CA tiers: <c>CaId</c> set, and <c>TenantId</c> = the CA's owning tenant (so an org admin can dominate).</item>
+/// </list>
 /// </summary>
 public readonly record struct ControlledTier(ControlledTierLevel Level, Guid? CaId)
 {
+    /// <summary>Owning tenant for org- and CA-scoped tiers; null for system tiers.</summary>
+    public Guid? TenantId { get; init; }
+
     /// <summary>
-    /// Returns true when this tier dominates <paramref name="target"/> — i.e. a holder of this
-    /// tier is permitted to approve/initiate a change affecting the target tier.
+    /// Returns true when this tier dominates <paramref name="target"/> — i.e. a holder of this tier
+    /// may approve/initiate a change affecting the target tier.
     /// <list type="bullet">
     /// <item>system-super dominates everything.</item>
-    /// <item>system-admin dominates system-admin and all CA-scoped tiers.</item>
+    /// <item>system-admin dominates everything except system-super.</item>
+    /// <item>org-admin(T) dominates org-admin/org-operator/ca-admin/operator within tenant T.</item>
+    /// <item>org-operator(T) dominates only org-operator(T).</item>
     /// <item>ca-admin(X) dominates ca-admin(X) and operator(X) — same CA only.</item>
     /// <item>operator(X) dominates only operator(X).</item>
     /// </list>
@@ -41,9 +59,16 @@ public readonly record struct ControlledTier(ControlledTierLevel Level, Guid? Ca
         return Level switch
         {
             ControlledTierLevel.SystemSuper => true,
-            ControlledTierLevel.SystemAdmin => target.Level <= ControlledTierLevel.SystemAdmin,
-            ControlledTierLevel.CaAdmin => CaId != null && target.CaId == CaId && target.Level <= ControlledTierLevel.CaAdmin,
-            ControlledTierLevel.Operator => CaId != null && target.CaId == CaId && target.Level <= ControlledTierLevel.Operator,
+            ControlledTierLevel.SystemAdmin => target.Level != ControlledTierLevel.SystemSuper,
+            ControlledTierLevel.OrgAdmin => TenantId != null && target.TenantId == TenantId
+                && target.Level is ControlledTierLevel.OrgAdmin or ControlledTierLevel.OrgOperator
+                    or ControlledTierLevel.CaAdmin or ControlledTierLevel.Operator,
+            ControlledTierLevel.OrgOperator => TenantId != null && target.TenantId == TenantId
+                && target.Level == ControlledTierLevel.OrgOperator,
+            ControlledTierLevel.CaAdmin => CaId != null && target.CaId == CaId
+                && target.Level is ControlledTierLevel.CaAdmin or ControlledTierLevel.Operator,
+            ControlledTierLevel.Operator => CaId != null && target.CaId == CaId
+                && target.Level == ControlledTierLevel.Operator,
             _ => false,
         };
     }

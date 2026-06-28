@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { apiGet, apiPost, apiPostWithMfa, apiDeleteWithMfa, apiBlob, api } from '../api/client';
+import { apiGet, apiPost, apiPostWithMfa, apiDeleteWithMfa, apiBlob } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
 import ConfirmModal from '../components/ConfirmModal';
+import { DataTable, DataTableColumn, DataTableBulkAction } from '../components/DataTable';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -13,20 +14,6 @@ function formatDate(d: string | null) {
 
 function downloadText(content: string, filename: string) {
     const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-}
-
-// Blob downloads use apiBlob() so auth + CSRF + refresh
-// handling matches the rest of the SPA. The hand-rolled getAuthHeaders helper
-// has been removed.
-async function downloadBinary(path: string, filename: string) {
-    const resp = await apiBlob(path);
-    const blob = await resp.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -44,11 +31,9 @@ const SshCaKeys: React.FC<{ refreshTrigger: number; onRefresh: () => void }> = (
     const [pendingCeremonies, setPendingCeremonies] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedKey, setExpandedKey] = useState<string | null>(null);
     const [generating, setGenerating] = useState(false);
     const [genForm, setGenForm] = useState({ name: '', keyType: 'ed25519', keySize: '', isUserCa: true, isHostCa: false, maxValidityHours: '720', tenantId: '' });
     const [showGenForm, setShowGenForm] = useState(false);
-    const [disablingKeyId, setDisablingKeyId] = useState<string | null>(null);
     const [confirmAction, setConfirmAction] = useState<{ action: () => Promise<void>; title: string; message: string; confirmLabel: string } | null>(null);
     const [confirmLoading, setConfirmLoading] = useState(false);
 
@@ -116,34 +101,17 @@ const SshCaKeys: React.FC<{ refreshTrigger: number; onRefresh: () => void }> = (
             message: `Are you sure you want to disable "${keyName}"? All active certificates will be revoked. This action cannot be undone.`,
             confirmLabel: 'Disable',
             action: async () => {
-                setDisablingKeyId(keyId);
-                try {
-                    const result: any = await apiDeleteWithMfa(
-                        `/api/v1/admin/ssh/ca-keys/${keyId}`,
-                        requireStepUp, 'disable-ssh-ca', keyId);
-                    if (result?.requiresCeremony) {
-                        showToast('info', result.message || 'Key ceremony created for approval.');
-                    } else {
-                        showToast('success', 'CA key disabled successfully.');
-                        onRefresh();
-                    }
-                } finally {
-                    setDisablingKeyId(null);
+                const result: any = await apiDeleteWithMfa(
+                    `/api/v1/admin/ssh/ca-keys/${keyId}`,
+                    requireStepUp, 'disable-ssh-ca', keyId);
+                if (result?.requiresCeremony) {
+                    showToast('info', result.message || 'Key ceremony created for approval.');
+                } else {
+                    showToast('success', 'CA key disabled successfully.');
+                    onRefresh();
                 }
             },
         });
-    };
-
-    const handleDownloadPublicKey = (key: any) => {
-        downloadText(key.publicKey, `${key.name || key.id}.pub`);
-    };
-
-    const handleDownloadKrl = async (key: any) => {
-        try {
-            await downloadBinary(`/api/v1/admin/ssh/ca-keys/${key.id}/krl`, 'revoked_keys.krl');
-        } catch (err: any) {
-            showToast('error', err.message || 'Failed to download KRL');
-        }
     };
 
     // Build a combined list: real keys + pending ceremony placeholders
@@ -163,7 +131,50 @@ const SshCaKeys: React.FC<{ refreshTrigger: number; onRefresh: () => void }> = (
             requiredApprovals: c.requiredApprovals,
         }));
 
-    const allKeys = [...pendingCreateEntries, ...keys];
+    const keyStatusLabel = (key: any) => key.isEnabled === false
+        ? 'Disabled'
+        : (pendingCeremonies.some((c: any) => c.targetEntityId === key.id && c.operationType === 'DeleteSshCa') ? 'Disable Pending' : 'CA Key');
+    const keyStatusBadge = (key: any) => {
+        if (key.isEnabled === false) return <StatusBadge status="revoked" label="Disabled" />;
+        if (pendingCeremonies.some((c: any) => c.targetEntityId === key.id && c.operationType === 'DeleteSshCa')) return <StatusBadge status="pending" label="Disable Pending" />;
+        return <StatusBadge status="active" label="CA Key" />;
+    };
+
+    const columns: DataTableColumn<any>[] = [
+        { key: 'name', header: 'Name', defaultWidth: 200, minWidth: 140, truncate: false, exportValue: (k) => k.name || 'Unnamed', render: (k) => <span className="text-gray-900 dark:text-white font-medium truncate">{k.name || 'Unnamed'}</span> },
+        { key: 'status', header: 'Status', defaultWidth: 130, truncate: false, exportValue: keyStatusLabel, render: keyStatusBadge },
+        { key: 'algorithm', header: 'Algorithm', defaultWidth: 150, exportValue: (k) => `${k.keyType || k.algorithm}${k.keySize ? ` (${k.keySize})` : ''}`, render: (k) => <span className="text-xs text-gray-700 dark:text-gray-300">{k.keyType || k.algorithm}{k.keySize ? ` (${k.keySize})` : ''}</span> },
+        {
+            key: 'role', header: 'Role', defaultWidth: 120, flex: true, truncate: false,
+            exportValue: (k) => [k.isUserCa ? 'User' : null, k.isHostCa ? 'Host' : null].filter(Boolean).join(', '),
+            render: (k) => (
+                <span className="flex gap-1">
+                    {k.isUserCa && <span className="px-1.5 py-0.5 text-xs bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-400 rounded">User</span>}
+                    {k.isHostCa && <span className="px-1.5 py-0.5 text-xs bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-400 rounded">Host</span>}
+                    {!k.isUserCa && !k.isHostCa && <span className="text-xs text-gray-500">-</span>}
+                </span>
+            ),
+        },
+        { key: 'created', header: 'Created', defaultWidth: 160, exportValue: (k) => formatDate(k.createdAt), render: (k) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(k.createdAt)}</span> },
+    ];
+
+    // Disable is step-up MFA gated with no bulk endpoint, so it's single-select.
+    const bulkActions: DataTableBulkAction<any>[] = [
+        { label: 'Disable', single: true, variant: 'danger', enabledFor: (k) => k.isEnabled !== false, onClick: (rows) => handleDisableKey(rows[0].id, rows[0].name) },
+    ];
+
+    const caKeyDrawer = (k: any) => (
+        <div className="text-sm">
+            <DetailField label="ID" value={k.id} mono />
+            <DetailField label="Status" value={keyStatusLabel(k)} />
+            <DetailField label="Algorithm" value={`${k.keyType || k.algorithm}${k.keySize ? ` (${k.keySize} bits)` : ''}`} />
+            <DetailField label="Max Validity" value={`${k.maxValidityHours}h`} />
+            <DetailField label="Created" value={formatDate(k.createdAt)} />
+            <DetailField label="User CA" value={k.isUserCa ? 'Yes' : 'No'} />
+            <DetailField label="Host CA" value={k.isHostCa ? 'Yes' : 'No'} />
+            <DetailField label="Public Key" value={k.publicKey} mono />
+        </div>
+    );
 
     return (
         <div className="space-y-4">
@@ -281,94 +292,34 @@ const SshCaKeys: React.FC<{ refreshTrigger: number; onRefresh: () => void }> = (
                 </form>
             )}
 
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-                {!loading && !error && keys.length === 0 && (
-                    <div className="p-4 text-sm text-gray-600 text-center">No SSH CA keys configured</div>
-                )}
-                {!loading && !error && allKeys.map((key) => {
-                    const id = key.id || key.fingerprint;
-                    const expanded = !key.isPendingCeremony && expandedKey === id;
-
-                    return (
-                        <div key={id} className={`border-b border-gray-300 dark:border-gray-700 last:border-b-0 ${key.isPendingCeremony ? 'opacity-70' : ''}`}>
-                            <button
-                                onClick={() => !key.isPendingCeremony && setExpandedKey(expanded ? null : id)}
-                                className={`w-full px-4 py-3 flex items-center gap-2 text-left ${key.isPendingCeremony ? 'cursor-default' : 'hover:bg-gray-200/50 dark:bg-gray-700/50'} transition-colors`}
-                            >
-                                <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
-                                {key.isPendingCeremony
-                                    ? <StatusBadge status="pending" label={`Ceremony (${key.currentApprovals}/${key.requiredApprovals})`} />
-                                    : key.isEnabled === false
-                                        ? <StatusBadge status="revoked" label="Disabled" />
-                                        : pendingCeremonies.some((c: any) => c.targetEntityId === key.id && c.operationType === 'DeleteSshCa')
-                                            ? <StatusBadge status="pending" label="Disable Pending" />
-                                            : <StatusBadge status="active" label="CA Key" />
-                                }
-                                <span className="text-sm text-gray-900 dark:text-white font-medium">{key.name || 'Unnamed'}</span>
-                                <span className="text-xs text-gray-600">{key.keyType || key.algorithm}{key.keySize ? ` (${key.keySize})` : ''}</span>
-                                {key.isUserCa && <span className="px-1.5 py-0.5 text-xs bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-400 rounded">User</span>}
-                                {key.isHostCa && <span className="px-1.5 py-0.5 text-xs bg-purple-900/50 text-purple-400 rounded">Host</span>}
-                                <span className="ml-auto text-xs text-gray-600">{formatDate(key.createdAt)}</span>
-                            </button>
-                            {expanded && (
-                                <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50">
-                                    <DetailField label="ID" value={key.id} mono />
-                                    <DetailField label="Algorithm" value={`${key.keyType || key.algorithm}${key.keySize ? ` (${key.keySize} bits)` : ''}`} />
-                                    <DetailField label="Max Validity" value={`${key.maxValidityHours}h`} />
-                                    <DetailField label="Created" value={formatDate(key.createdAt)} />
-                                    <DetailField label="Public Key" value={key.publicKey} mono />
-
-                                    <div className="mt-3 flex gap-2 flex-wrap">
-                                        <button
-                                            onClick={() => handleDownloadPublicKey(key)}
-                                            className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                        >
-                                            Download Public Key (.pub)
-                                        </button>
-                                        <button
-                                            onClick={() => handleDownloadKrl(key)}
-                                            className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                        >
-                                            Download KRL
-                                        </button>
-                                        {key.isEnabled !== false && (
-                                            <button
-                                                onClick={() => handleDisableKey(key.id, key.name)}
-                                                disabled={disablingKeyId === key.id}
-                                                className="px-3 py-1.5 text-xs bg-red-800 text-red-800 dark:text-red-200 rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
-                                            >
-                                                {disablingKeyId === key.id ? 'Disabling...' : 'Disable'}
-                                            </button>
-                                        )}
-                                    </div>
-
-                                    <div className="mt-3 p-3 bg-white dark:bg-gray-950 border border-gray-300 dark:border-gray-700 rounded text-xs text-gray-600 dark:text-gray-400 space-y-1">
-                                        {key.isUserCa && (
-                                            <p>
-                                                <span className="text-gray-700 dark:text-gray-300 font-medium">User CA:</span>{' '}
-                                                Add to <code className="text-blue-800 dark:text-blue-400">TrustedUserCAKeys</code> in sshd_config
-                                            </p>
-                                        )}
-                                        {key.isHostCa && (
-                                            <p>
-                                                <span className="text-gray-700 dark:text-gray-300 font-medium">Host CA:</span>{' '}
-                                                Add to <code className="text-blue-800 dark:text-blue-400">known_hosts</code> with{' '}
-                                                <code className="text-blue-800 dark:text-blue-400">@cert-authority * {key.publicKey?.split(' ').slice(0, 2).join(' ')}...</code>
-                                            </p>
-                                        )}
-                                        <p>
-                                            <span className="text-gray-700 dark:text-gray-300 font-medium">Public URL:</span>{' '}
-                                            <code className="text-blue-800 dark:text-blue-400">/ssh/ca-keys/{key.id}/public-key</code>
-                                        </p>
-                                    </div>
-                                </div>
-                            )}
+            {pendingCreateEntries.length > 0 && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-lg p-3 text-xs space-y-1">
+                    <p className="font-semibold text-amber-800 dark:text-amber-300">Pending CA key ceremonies</p>
+                    {pendingCreateEntries.map((c) => (
+                        <div key={c.id} className="flex items-center gap-2">
+                            <StatusBadge status="pending" label={`Ceremony (${c.currentApprovals}/${c.requiredApprovals})`} />
+                            <span className="text-gray-700 dark:text-gray-300">{c.name}</span>
                         </div>
-                    );
-                })}
-            </div>
+                    ))}
+                </div>
+            )}
+
+            <DataTable<any>
+                tableId="ssh-ca-keys"
+                title="SSH CA Keys"
+                rows={keys}
+                rowKey={(k) => k.id || k.fingerprint}
+                loading={loading}
+                error={error}
+                empty="No SSH CA keys configured"
+                columns={columns}
+                selectable
+                bulkActions={bulkActions}
+                exportFileName="ssh-ca-keys"
+                renderDrawer={caKeyDrawer}
+                drawerTitle={(k) => k.name || 'Unnamed'}
+                detailPath={(k) => `/ssh/ca-keys/${k.id}`}
+            />
 
             <ConfirmModal
                 isOpen={!!confirmAction}
@@ -414,8 +365,8 @@ const SshCerts: React.FC<{ refreshTrigger: number; onRefresh: () => void; caKeys
     const [requestProfiles, setRequestProfiles] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedKey, setExpandedKey] = useState<string | null>(null);
     const [showSignForm, setShowSignForm] = useState(false);
+    const [confirmRevoke, setConfirmRevoke] = useState<any[] | null>(null);
     const [signForm, setSignForm] = useState({ certType: 'user' as 'user' | 'host', sshRequestProfileId: '', sshSigningProfileId: '', sshCertProfileId: '', publicKey: '', identity: '', principals: '', validityHours: '' });
     const [validationErrors, setValidationErrors] = useState<string[]>([]);
     const [signing, setSigning] = useState(false);
@@ -571,17 +522,23 @@ const SshCerts: React.FC<{ refreshTrigger: number; onRefresh: () => void; caKeys
         }
     };
 
-    const handleRevoke = async (certId: string) => {
-        if (!confirm('Are you sure you want to revoke this SSH certificate? This action cannot be undone.')) return;
-        if (!selectedCaKeyId) { showToast('warning', 'Please select a CA key first.'); return; }
-        setRevoking(certId);
+    // Revoke is a plain endpoint (no step-up), so bulk revoke just loops.
+    const performBulkRevoke = async () => {
+        if (!confirmRevoke) return;
+        if (!selectedCaKeyId) { showToast('warning', 'Please select a CA key first.'); setConfirmRevoke(null); return; }
+        setRevoking('bulk');
+        let ok = 0, failed = 0;
         try {
-            await apiPost(`/api/v1/admin/ssh/ca-keys/${selectedCaKeyId}/certificates/${certId}/revoke`, {});
+            for (const c of confirmRevoke) {
+                if (c.isRevoked) continue;
+                try { await apiPost(`/api/v1/admin/ssh/ca-keys/${selectedCaKeyId}/certificates/${c.id}/revoke`, {}); ok++; } catch { failed++; }
+            }
+            if (ok) showToast('success', `Revoked ${ok} certificate${ok !== 1 ? 's' : ''}.`);
+            if (failed) showToast('error', `${failed} failed to revoke.`);
             onRefresh();
-        } catch (err: any) {
-            showToast('error', err.message || 'Revocation failed');
         } finally {
             setRevoking(null);
+            setConfirmRevoke(null);
         }
     };
 
@@ -613,6 +570,44 @@ const SshCerts: React.FC<{ refreshTrigger: number; onRefresh: () => void; caKeys
             return [val];
         }
         return [];
+    };
+
+    const certIsUser = (c: any) => (c.certificateType || c.type || c.certType || '').toLowerCase().includes('user');
+
+    const columns: DataTableColumn<any>[] = [
+        {
+            key: 'status', header: 'Status', defaultWidth: 110, truncate: false,
+            exportValue: (c) => (c.isRevoked ? 'Revoked' : (certIsUser(c) ? 'User' : 'Host')),
+            render: (c) => c.isRevoked ? <StatusBadge status="revoked" label="Revoked" /> : <StatusBadge status={certIsUser(c) ? 'pending' : 'active'} label={certIsUser(c) ? 'User' : 'Host'} />,
+        },
+        { key: 'keyId', header: 'Key ID', defaultWidth: 180, minWidth: 130, truncate: false, exportValue: (c) => c.keyId || c.identity || '', render: (c) => <span className={`text-sm truncate ${c.isRevoked ? 'text-gray-500 line-through' : 'text-gray-900 dark:text-white'}`}>{c.keyId || c.identity}</span> },
+        { key: 'serial', header: 'Serial', defaultWidth: 120, exportValue: (c) => c.serialNumber || c.serial || '', render: (c) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400">#{c.serialNumber || c.serial}</span> },
+        { key: 'principals', header: 'Principals', defaultWidth: 200, flex: true, exportValue: (c) => parsePrincipals(c.principals).join(', '), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{parsePrincipals(c.principals).join(', ')}</span> },
+        { key: 'validBefore', header: 'Expires', defaultWidth: 160, exportValue: (c) => formatDate(c.validBefore || c.expiresAt), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(c.validBefore || c.expiresAt)}</span> },
+    ];
+
+    const bulkActions: DataTableBulkAction<any>[] = [
+        { label: 'Download', single: true, onClick: (rows) => handleDownloadCert(rows[0]) },
+        { label: 'Revoke', variant: 'danger', enabledFor: (c) => !c.isRevoked, onClick: (rows) => setConfirmRevoke(rows) },
+    ];
+
+    const certDrawer = (c: any) => {
+        const principals = parsePrincipals(c.principals);
+        const extensions = parseExtensions(c.extensions);
+        return (
+            <div className="text-sm">
+                <DetailField label="ID" value={c.id} mono />
+                <DetailField label="Serial" value={c.serialNumber || c.serial} mono />
+                <DetailField label="Type" value={c.certificateType || c.type || c.certType} />
+                <DetailField label="Key ID" value={c.keyId || c.identity} />
+                <DetailField label="Principals" value={principals.join(', ')} />
+                <DetailField label="Valid After" value={formatDate(c.validAfter || c.issuedAt)} />
+                <DetailField label="Valid Before" value={formatDate(c.validBefore || c.expiresAt)} />
+                <DetailField label="CA Key ID" value={c.sshCaKeyId} mono />
+                {extensions.length > 0 && <DetailField label="Extensions" value={extensions.join(', ')} />}
+                <DetailField label="Revoked" value={c.isRevoked ? 'Yes' : 'No'} />
+            </div>
+        );
     };
 
     return (
@@ -850,76 +845,36 @@ const SshCerts: React.FC<{ refreshTrigger: number; onRefresh: () => void; caKeys
             )}
 
             {/* Certificate List */}
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-                {!loading && !error && certs.length === 0 && (
-                    <div className="p-4 text-sm text-gray-600 text-center">No SSH certificates issued</div>
-                )}
-                {!loading && !error && certs.map((cert) => {
-                    const key = cert.id || cert.serial || cert.fingerprint;
-                    const expanded = expandedKey === key;
-                    const isUser = (cert.certificateType || cert.type || cert.certType || '').toLowerCase().includes('user');
-                    const isRevoked = cert.isRevoked;
-                    const principals = parsePrincipals(cert.principals);
-                    const extensions = parseExtensions(cert.extensions);
+            <DataTable<any>
+                tableId="ssh-certs"
+                title="SSH Certificates"
+                rows={certs}
+                rowKey={(c) => c.id || c.serial || c.fingerprint}
+                loading={loading}
+                error={error}
+                empty="No SSH certificates issued"
+                columns={columns}
+                selectable
+                bulkActions={bulkActions}
+                exportFileName="ssh-certificates"
+                renderDrawer={certDrawer}
+                drawerTitle={(c) => c.keyId || c.identity || `#${c.serialNumber || c.serial}`}
+                detailPath={(c) => `/ssh/certs/${c.id}?caKey=${c.sshCaKeyId || selectedCaKeyId}`}
+            />
 
-                    return (
-                        <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                            <button
-                                onClick={() => setExpandedKey(expanded ? null : key)}
-                                className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
-                            >
-                                <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
-                                {isRevoked
-                                    ? <StatusBadge status="revoked" label="Revoked" />
-                                    : <StatusBadge status={isUser ? 'pending' : 'active'} label={isUser ? 'User' : 'Host'} />
-                                }
-                                <span className={`text-sm ${isRevoked ? 'text-gray-600 line-through' : 'text-gray-900 dark:text-white'}`}>
-                                    {cert.keyId || cert.identity}
-                                </span>
-                                <span className="font-mono text-xs text-gray-600">#{cert.serialNumber || cert.serial}</span>
-                                <span className="text-xs text-gray-600 truncate">{principals.join(', ')}</span>
-                                <span className="ml-auto text-xs text-gray-600">{formatDate(cert.validBefore || cert.expiresAt)}</span>
-                            </button>
-                            {expanded && (
-                                <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50">
-                                    <DetailField label="ID" value={cert.id} mono />
-                                    <DetailField label="Serial" value={cert.serialNumber || cert.serial} mono />
-                                    <DetailField label="Type" value={cert.certificateType || cert.type || cert.certType} />
-                                    <DetailField label="Key ID" value={cert.keyId || cert.identity} />
-                                    <DetailField label="Principals" value={principals.join(', ')} />
-                                    <DetailField label="Valid After" value={formatDate(cert.validAfter || cert.issuedAt)} />
-                                    <DetailField label="Valid Before" value={formatDate(cert.validBefore || cert.expiresAt)} />
-                                    <DetailField label="CA Key ID" value={cert.sshCaKeyId} mono />
-                                    {extensions.length > 0 && <DetailField label="Extensions" value={extensions.join(', ')} />}
-                                    <DetailField label="Revoked" value={isRevoked ? 'Yes' : 'No'} />
-                                    <DetailField label="Issued By" value={cert.issuedByUserId || '-'} mono />
-                                    <DetailField label="Source IP" value={cert.sourceIp || '-'} />
-
-                                    <div className="mt-3 flex gap-2 flex-wrap">
-                                        <button
-                                            onClick={() => handleDownloadCert(cert)}
-                                            className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                        >
-                                            Download Certificate
-                                        </button>
-                                        {!isRevoked && (
-                                            <button
-                                                onClick={() => handleRevoke(cert.id)}
-                                                disabled={revoking === cert.id}
-                                                className="px-3 py-1.5 text-xs bg-red-800 text-red-800 dark:text-red-200 rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
-                                            >
-                                                {revoking === cert.id ? 'Revoking...' : 'Revoke'}
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
-            </div>
+            <ConfirmModal
+                isOpen={!!confirmRevoke}
+                title="Revoke SSH Certificates"
+                message={confirmRevoke ? (() => {
+                    const n = confirmRevoke.filter((c) => !c.isRevoked).length;
+                    return `Revoke ${n} certificate${n !== 1 ? 's' : ''}? This cannot be undone.`;
+                })() : ''}
+                confirmLabel="Revoke"
+                confirmClass="bg-red-600 hover:bg-red-700"
+                loading={revoking === 'bulk'}
+                onConfirm={performBulkRevoke}
+                onCancel={() => setConfirmRevoke(null)}
+            />
         </div>
     );
 };

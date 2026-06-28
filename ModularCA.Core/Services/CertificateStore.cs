@@ -53,6 +53,22 @@ public class CertificateStore(ModularCADbContext dbContext) : ICertificateStore
         };
 
         _dbContext.Certificates.Add(entity);
+
+        // DO NOT set entity.CertificateAuthority here. CertificateEntity has NO own foreign key to
+        // CertificateAuthority — its only CertificateAuthority relationship is the 1:1 whose foreign
+        // key lives on the CA side (CertificateAuthorityEntity.CertificateId, via
+        // [ForeignKey("CertificateId")] on CertificateAuthorityEntity.Certificate). Assigning this
+        // navigation therefore makes EF write CA.CertificateId = thisCert.CertificateId, which CLOBBERS
+        // the CA's pointer to its OWN identity certificate. Concretely, issuing a CA's TSA/OCSP infra
+        // cert (which has IssuerCertificateId = that CA's cert) would repoint the CA at the infra cert,
+        // orphaning the real CA cert and its signing profile (IssuerId no longer == CA.CertificateId) —
+        // the exact corruption that produced "Parent CA signing profile not found".
+        //
+        // The issuing CA is already recorded in IssuerCertificateId above, and
+        // CertificateAccessEvaluator.ResolveCertScope resolves a cert's CA scope from that. So this
+        // assignment was both semantically wrong (the navigation means "the CA this cert IS the identity
+        // cert of", not "the CA that issued it") and unnecessary.
+
         await _dbContext.SaveChangesAsync();
     }
 

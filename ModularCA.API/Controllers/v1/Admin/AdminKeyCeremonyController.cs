@@ -466,10 +466,21 @@ public class AdminKeyCeremonyController : ControllerBase
         if (!isInitiator && !isApprover)
             return StatusCode(403, new { error = "Only the initiator or an approver can execute this ceremony." });
 
-        // Deserialize locked parameters
+        // Deserialize locked parameters. ONLY the X.509 CA-creation operations
+        // (CreateRootCA / CreateIntermediateCA) use the generic KeyCeremonyParameters shape and
+        // fall through to the common "CA created" tail below. SSH, revoke, tenant-policy, and
+        // controlled-user ceremonies carry their own parameter shapes and deserialize them inside
+        // their own branch. We must NOT force the generic deserialize for those: e.g. an ed25519
+        // SSH CA serializes KeySize as null, which cannot bind to KeyCeremonyParameters.KeySize
+        // (a non-nullable int) and would throw here — returning a misleading "Failed to deserialize
+        // ceremony parameters" 400 before the SSH branch ever runs.
         ModularCA.Shared.Models.KeyCeremonyParameters? parameters = null;
-        if (!string.IsNullOrEmpty(ceremony.ParametersJson))
+        var usesGenericCaParameters =
+            ceremony.OperationType is "CreateRootCA" or "CreateIntermediateCA";
+        if (usesGenericCaParameters)
         {
+            if (string.IsNullOrEmpty(ceremony.ParametersJson))
+                return BadRequest(new { error = "Ceremony has no parameters to execute." });
             try
             {
                 parameters = JsonSerializer.Deserialize<ModularCA.Shared.Models.KeyCeremonyParameters>(
@@ -479,9 +490,9 @@ public class AdminKeyCeremonyController : ControllerBase
             {
                 return BadRequest(new { error = "Failed to deserialize ceremony parameters." });
             }
+            if (parameters == null)
+                return BadRequest(new { error = "Ceremony has no parameters to execute." });
         }
-        if (parameters == null)
-            return BadRequest(new { error = "Ceremony has no parameters to execute." });
 
         try
         {
@@ -489,6 +500,8 @@ public class AdminKeyCeremonyController : ControllerBase
 
             if (ceremony.OperationType == "CreateRootCA")
             {
+                if (parameters == null)
+                    return BadRequest(new { error = "Ceremony has no parameters to execute." });
                 newCa = await _caCreation.CreateRootAsync(
                     parameters.SubjectCN, parameters.SubjectO, parameters.SubjectOU,
                     parameters.SubjectL, parameters.SubjectST, parameters.SubjectC,
@@ -502,6 +515,8 @@ public class AdminKeyCeremonyController : ControllerBase
             }
             else if (ceremony.OperationType == "CreateIntermediateCA")
             {
+                if (parameters == null)
+                    return BadRequest(new { error = "Ceremony has no parameters to execute." });
                 if (parameters.ParentCaId == null)
                     return BadRequest(new { error = "Parent CA ID is required for intermediate CA creation." });
 

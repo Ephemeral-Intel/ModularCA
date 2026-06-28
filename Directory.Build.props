@@ -1,0 +1,23 @@
+<Project>
+
+  <!--
+    Single source of truth for the application version.
+
+    The repo-root VERSION file is read here and applied to EVERY .NET project: MSBuild imports the
+    nearest Directory.Build.props automatically for all projects beneath this directory, so setting
+    <Version> here flows into AssemblyVersion / FileVersion / InformationalVersion of each assembly
+    (including ModularCA.API, whose VersionController reports it at runtime).
+
+    The SAME VERSION file is read by the frontends' vite.config.ts (injected as __APP_VERSION__), so
+    the backend and the UI always report the identical version.
+
+    To bump the version, edit ./VERSION ONLY. A value like "0.1.0-rc2" is parsed by MSBuild as
+    VersionPrefix=0.1.0 + VersionSuffix=rc2: AssemblyVersion/FileVersion become 0.1.0.0 (numeric, as
+    required) while InformationalVersion keeps the full "0.1.0-rc2".
+  -->
+  <PropertyGroup>
+    <ModularCaVersionRaw>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)VERSION'))</ModularCaVersionRaw>
+    <Version>$(ModularCaVersionRaw.Trim())</Version>
+  </PropertyGroup>
+
+</Project>

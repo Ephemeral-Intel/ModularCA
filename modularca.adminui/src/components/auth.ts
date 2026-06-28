@@ -5,15 +5,13 @@
 import { getToken as clientGetToken, clearTokens } from '../api/client';
 
 export function isAuthenticated(): boolean {
-    const token = clientGetToken();
-    const expiresAt = localStorage.getItem('expiresAt');
-
-    if (!token || !expiresAt) return false;
-
-    const now = new Date();
-    const exp = new Date(expiresAt);
-
-    return now < exp;
+    // Presence-based, NOT clock-based. The server is the authority on token validity (it validates
+    // the JWT, and the refresh-on-401 flow in api/client handles genuine expiry). We deliberately do
+    // NOT gate on `new Date() < exp` here: a client/server clock skew would otherwise make a
+    // freshly-issued token look already-expired and bounce ProtectedRoute to /login in an infinite
+    // loop while /me still returns 200. A stale/expired token left here is harmless — the next API
+    // call refreshes it, or the server 401 clears it.
+    return !!clientGetToken() && !!localStorage.getItem('expiresAt');
 }
 
 export function getToken(): string | null {

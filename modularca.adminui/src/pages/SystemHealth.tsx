@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
+import Chevron from '../components/Chevron';
 import { apiGet, apiPost, apiPut, apiDelete, apiPostWithMfa, getToken } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { APP_VERSION } from '../version';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -189,7 +191,7 @@ const SystemStatusCard: React.FC = () => {
     return (
         <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-4">
             <h2 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">System Status</h2>
-            <DetailField label="Application" value="ModularCA v0.1.0-rc1" />
+            <DetailField label="Application" value={`ModularCA v${APP_VERSION}`} />
             <DetailField label="Server Uptime" value={serverUptime != null ? formatUptime(serverUptime) : '—'} />
             <DetailField label="Current Time" value={new Date(now).toLocaleString()} />
         </div>
@@ -246,80 +248,6 @@ const CertStatsCard: React.FC = () => {
                     ))}
                 </div>
             )}
-        </div>
-    );
-};
-
-/* ─── Upcoming Expirations Card ─── */
-const UpcomingExpirationsCard: React.FC = () => {
-    const [certs, setCerts] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
-    const [expandedKey, setExpandedKey] = useState<string | null>(null);
-
-    useEffect(() => {
-        apiGet<any>('/api/v1/admin/certificates')
-            .then((data) => {
-                const all: any[] = Array.isArray(data) ? data : (data.items || []);
-                const now = new Date();
-                const in90 = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
-                const expiring = all
-                    .filter((c) => !c.revoked && new Date(c.notAfter) > now && new Date(c.notAfter) <= in90)
-                    .sort((a, b) => new Date(a.notAfter).getTime() - new Date(b.notAfter).getTime());
-                setCerts(expiring);
-            })
-            .catch((err) => setError(err.message))
-            .finally(() => setLoading(false));
-    }, []);
-
-    const expiryColor = (days: number): 'active' | 'expired' | 'revoked' => {
-        if (days > 30) return 'active';
-        if (days >= 7) return 'expired';
-        return 'revoked';
-    };
-
-    const expiryLabel = (days: number): string => {
-        if (days <= 0) return 'Expired';
-        return `${days}d`;
-    };
-
-    return (
-        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Upcoming Expirations (90 days)</h2>
-            </div>
-            {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-            {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-            {!loading && !error && certs.length === 0 && (
-                <div className="p-4 text-sm text-gray-600 text-center">No certificates expiring within 90 days</div>
-            )}
-            {!loading && !error && certs.map((cert) => {
-                const key = cert.serialNumber || cert.certificateId;
-                const expanded = expandedKey === key;
-                const days = daysUntil(cert.notAfter);
-                return (
-                    <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                        <button onClick={() => setExpandedKey(expanded ? null : key)}
-                            className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors">
-                            <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
-                            <StatusBadge status={expiryColor(days)} label={expiryLabel(days)} />
-                            <span className="text-sm text-gray-900 dark:text-white truncate">{cert.subjectDN}</span>
-                            <span className="ml-auto text-xs text-gray-600">{formatDate(cert.notAfter)}</span>
-                        </button>
-                        {expanded && (
-                            <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50">
-                                <DetailField label="Serial" value={cert.serialNumber} mono />
-                                <DetailField label="Subject" value={cert.subjectDN} />
-                                <DetailField label="Issuer" value={cert.issuer} />
-                                <DetailField label="Not Before" value={formatDate(cert.notBefore)} />
-                                <DetailField label="Not After" value={formatDate(cert.notAfter)} />
-                                <DetailField label="Key Algorithm" value={cert.keyAlgorithm} />
-                                <DetailField label="SANs" value={cert.subjectAlternativeNames?.join(', ')} />
-                            </div>
-                        )}
-                    </div>
-                );
-            })}
         </div>
     );
 };
@@ -571,7 +499,6 @@ const SystemHealth: React.FC = () => {
                 <SystemStatusCard />
                 <CertStatsCard />
             </div>
-            <UpcomingExpirationsCard />
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <SchedulerStatusCard />
                 <ProtocolActivityCard />

@@ -1,48 +1,46 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { apiGet, apiPut, apiPost } from '../api/client';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { DataTable, DataTableColumn, DataTableBulkAction } from '../components/DataTable';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 const labelClass = 'block text-xs text-gray-600 dark:text-gray-400 mb-1';
 
 const validateEmails = (value: string): string | null => {
     if (!value.trim()) return null;
     const emails = value.split(',').map(e => e.trim()).filter(Boolean);
     const invalid = emails.filter(e => !EMAIL_REGEX.test(e));
-    if (invalid.length > 0) {
-        return `Invalid email${invalid.length > 1 ? 's' : ''}: ${invalid.join(', ')}`;
-    }
-    return null;
+    return invalid.length > 0 ? `Invalid email${invalid.length > 1 ? 's' : ''}: ${invalid.join(', ')}` : null;
 };
 
-interface AlertConfig {
-    enabled: boolean;
-    minimumSeverity: string;
-    cooldownMinutes: number;
-}
+interface AlertConfig { enabled: boolean; minimumSeverity: string; cooldownMinutes: number; }
 
 const NotificationManagement: React.FC = () => {
     const [prefs, setPrefs] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
-    const [expandedType, setExpandedType] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
     const [testStatus, setTestStatus] = useState<string | null>(null);
-    const [editRecipients, setEditRecipients] = useState<Record<string, string>>({});
-    const [editDaysBeforeExpiry, setEditDaysBeforeExpiry] = useState<Record<string, number | undefined>>({});
-    const [emailErrors, setEmailErrors] = useState<Record<string, string | null>>({});
 
-    // Alert configuration state
     const [alertConfig, setAlertConfig] = useState<AlertConfig | null>(null);
     const [alertConfigLoading, setAlertConfigLoading] = useState(true);
     const [emailConfig, setEmailConfig] = useState<any | null>(null);
 
+    // Single-row edit modal
+    const [editTarget, setEditTarget] = useState<any | null>(null);
+    const [editForm, setEditForm] = useState<{ recipients: string; daysBeforeExpiry: string; enabled: boolean; hasDays: boolean }>({ recipients: '', daysBeforeExpiry: '', enabled: true, hasDays: false });
+    const [editEmailError, setEditEmailError] = useState<string | null>(null);
+    const [saving, setSaving] = useState(false);
+
     const loadPrefs = async () => {
         setLoading(true);
+        setError(null);
         try {
             const data = await apiGet<any[]>('/api/v1/admin/notifications');
-            setPrefs(data);
-        } catch { }
+            setPrefs(Array.isArray(data) ? data : ((data as any).items || []));
+        } catch (err: any) {
+            setError(err.message || 'Failed to load notification preferences');
+        }
         setLoading(false);
     };
 
@@ -50,7 +48,6 @@ const NotificationManagement: React.FC = () => {
         setAlertConfigLoading(true);
         try {
             const config = await apiGet<any>('/api/v1/admin/config');
-            // The config exposes Alert under various possible keys
             if (config.Alert) {
                 setAlertConfig({
                     enabled: config.Alert.Enabled ?? config.Alert.enabled ?? true,
@@ -58,51 +55,44 @@ const NotificationManagement: React.FC = () => {
                     cooldownMinutes: config.Alert.CooldownMinutes ?? config.Alert.cooldownMinutes ?? 5,
                 });
             }
-            if (config.Email) {
-                setEmailConfig(config.Email);
-            }
+            if (config.Email) setEmailConfig(config.Email);
         } catch { }
         setAlertConfigLoading(false);
     };
 
-    useEffect(() => {
+    useEffect(() => { loadPrefs(); loadConfig(); }, []);
+
+    const bulkSetEnabled = async (rows: any[], enabled: boolean) => {
+        const targets = rows.filter((p) => p.enabled !== enabled);
+        if (targets.length === 0) { setTestStatus(`All selected are already ${enabled ? 'enabled' : 'disabled'}.`); setTimeout(() => setTestStatus(null), 3000); return; }
+        for (const p of targets) {
+            try { await apiPut(`/api/v1/admin/notifications/${p.eventType}`, { enabled }); } catch { }
+        }
         loadPrefs();
-        loadConfig();
-    }, []);
-
-    const toggleEnabled = async (eventType: string, currentEnabled: boolean) => {
-        try {
-            await apiPut(`/api/v1/admin/notifications/${eventType}`, { enabled: !currentEnabled });
-        } finally {
-            loadPrefs();
-        }
     };
 
-    const handleRecipientsChange = (eventType: string, value: string) => {
-        setEditRecipients({ ...editRecipients, [eventType]: value });
-        setEmailErrors({ ...emailErrors, [eventType]: validateEmails(value) });
+    const openEdit = (p: any) => {
+        const hasDays = p.daysBeforeExpiry !== undefined && p.daysBeforeExpiry !== null;
+        setEditForm({ recipients: p.recipients ?? '', daysBeforeExpiry: hasDays ? String(p.daysBeforeExpiry) : '', enabled: !!p.enabled, hasDays });
+        setEditEmailError(null);
+        setEditTarget(p);
     };
 
-    const saveRecipients = async (eventType: string) => {
-        const error = validateEmails(editRecipients[eventType] ?? '');
-        if (error) {
-            setEmailErrors({ ...emailErrors, [eventType]: error });
-            return;
-        }
+    const saveEdit = async () => {
+        if (!editTarget) return;
+        const emailErr = validateEmails(editForm.recipients);
+        if (emailErr) { setEditEmailError(emailErr); return; }
+        setSaving(true);
         try {
-            await apiPut(`/api/v1/admin/notifications/${eventType}`, { recipients: editRecipients[eventType] });
-        } finally {
+            const body: any = { enabled: editForm.enabled, recipients: editForm.recipients };
+            if (editForm.hasDays && editForm.daysBeforeExpiry) body.daysBeforeExpiry = parseInt(editForm.daysBeforeExpiry, 10);
+            await apiPut(`/api/v1/admin/notifications/${editTarget.eventType}`, body);
+            setEditTarget(null);
             loadPrefs();
-        }
-    };
-
-    const saveDaysBeforeExpiry = async (eventType: string) => {
-        const days = editDaysBeforeExpiry[eventType];
-        if (days === undefined || days < 1) return;
-        try {
-            await apiPut(`/api/v1/admin/notifications/${eventType}`, { daysBeforeExpiry: days });
+        } catch (err: any) {
+            setEditEmailError(err.message || 'Failed to save');
         } finally {
-            loadPrefs();
+            setSaving(false);
         }
     };
 
@@ -117,13 +107,46 @@ const NotificationManagement: React.FC = () => {
         setTimeout(() => setTestStatus(null), 5000);
     };
 
+    const columns: DataTableColumn<any>[] = useMemo(() => [
+        { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (p) => (p.enabled ? 'Enabled' : 'Disabled'),
+            render: (p) => <StatusBadge status={p.enabled ? 'enabled' : 'disabled'} /> },
+        { key: 'eventType', header: 'Event', defaultWidth: 280, minWidth: 180, truncate: false, exportValue: (p) => p.eventType,
+            render: (p) => (
+                <div className="min-w-0">
+                    <div className="text-gray-900 dark:text-white font-medium truncate">{p.eventType}</div>
+                    {p.description && <div className="text-xs text-gray-600 truncate">{p.description}</div>}
+                </div>
+            ) },
+        { key: 'days', header: 'Expiry Warning', defaultWidth: 130, align: 'right', exportValue: (p) => (p.daysBeforeExpiry ?? ''),
+            render: (p) => (p.daysBeforeExpiry ? `${p.daysBeforeExpiry}d` : '-') },
+        { key: 'recipients', header: 'Recipients', defaultWidth: 220, exportValue: (p) => p.recipients || '',
+            render: (p) => p.recipients || <span className="text-gray-500">(admin default)</span> },
+    ], []);
+
+    const bulkActions: DataTableBulkAction<any>[] = [
+        { label: 'Edit', single: true, onClick: (rows) => openEdit(rows[0]) },
+        { label: 'Enable', onClick: (rows) => bulkSetEnabled(rows, true) },
+        { label: 'Disable', onClick: (rows) => bulkSetEnabled(rows, false) },
+    ];
+
+    const renderDrawer = (p: any) => (
+        <div className="text-sm">
+            <DetailField label="Event Type" value={p.eventType} />
+            <DetailField label="Status" value={<StatusBadge status={p.enabled ? 'enabled' : 'disabled'} />} />
+            {p.description && <DetailField label="Description" value={p.description} />}
+            {(p.daysBeforeExpiry !== undefined && p.daysBeforeExpiry !== null) && <DetailField label="Expiry Warning" value={`${p.daysBeforeExpiry} days before expiry`} />}
+            <DetailField label="Recipients" value={p.recipients || '(uses admin default)'} />
+            <p className="text-[11px] text-gray-500 pt-2">Select the row in the table to edit, enable, or disable.</p>
+        </div>
+    );
+
+    const inputCls = 'w-full bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500';
+
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
             <div className="flex items-center justify-between">
                 <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Email Notifications</h1>
-                <button onClick={sendTestEmail} className="px-4 py-2 bg-blue-600 text-gray-900 dark:text-white rounded hover:bg-blue-700 text-sm">
-                    Send Test Email
-                </button>
+                <button onClick={sendTestEmail} className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm">Send Test Email</button>
             </div>
 
             {testStatus && (
@@ -132,129 +155,32 @@ const NotificationManagement: React.FC = () => {
                 </div>
             )}
 
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Notification Preferences</h3>
-                    <p className="text-xs text-gray-600 mt-1">Configure which events send email notifications and to whom.</p>
-                </div>
-
-                {loading && <div className="p-4 text-gray-600 dark:text-gray-400 text-sm text-center">Loading...</div>}
-
-                {prefs.map((pref: any) => (
-                    <div key={pref.eventType} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                        <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-200/50 dark:bg-gray-700/50"
-                            onClick={() => setExpandedType(expandedType === pref.eventType ? null : pref.eventType)}>
-                            <div className="flex items-center gap-3">
-                                <button
-                                    onClick={(e) => { e.stopPropagation(); toggleEnabled(pref.eventType, pref.enabled); }}
-                                    className={`w-10 h-5 rounded-full transition-colors relative ${pref.enabled ? 'bg-green-600' : 'bg-gray-600'}`}>
-                                    <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${pref.enabled ? 'left-5' : 'left-0.5'}`} />
-                                </button>
-                                <div>
-                                    <span className="text-sm text-gray-900 dark:text-white font-medium">{pref.eventType}</span>
-                                    {pref.description && <span className="text-xs text-gray-600 ml-2">{pref.description}</span>}
-                                </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                {pref.daysBeforeExpiry && <span className="text-xs text-gray-600">{pref.daysBeforeExpiry}d warning</span>}
-                                <StatusBadge status={pref.enabled ? 'enabled' : 'disabled'} />
-                                <span className="text-gray-600 dark:text-gray-400 text-xs">{expandedType === pref.eventType ? '\u25B2' : '\u25BC'}</span>
-                            </div>
-                        </div>
-
-                        {expandedType === pref.eventType && (
-                            <div className="px-4 pb-4 bg-gray-100/50 dark:bg-gray-800/50 border-t border-gray-300 dark:border-gray-700 pt-3 space-y-3">
-                                <DetailField label="Event Type" value={pref.eventType} />
-
-                                {pref.description && (
-                                    <div>
-                                        <label className="text-xs text-gray-600 dark:text-gray-400 block mb-1">Description</label>
-                                        <p className="text-sm text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-700/40 rounded px-3 py-2 border border-gray-400 dark:border-gray-600">
-                                            {pref.description}
-                                        </p>
-                                    </div>
-                                )}
-
-                                {pref.daysBeforeExpiry !== undefined && pref.daysBeforeExpiry !== null && (
-                                    <div>
-                                        <label className="text-xs text-gray-600 dark:text-gray-400 block mb-1">Days Before Expiry</label>
-                                        <div className="flex items-center gap-2">
-                                            <input
-                                                type="text"
-                                                inputMode="numeric"
-                                                value={editDaysBeforeExpiry[pref.eventType] ?? pref.daysBeforeExpiry ?? ''}
-                                                onChange={e => { const v = e.target.value.replace(/\D/g, ''); setEditDaysBeforeExpiry({
-                                                    ...editDaysBeforeExpiry,
-                                                    [pref.eventType]: v ? parseInt(v, 10) : undefined
-                                                }); }}
-                                                className="w-24 bg-gray-200 dark:bg-gray-700 border border-gray-400 dark:border-gray-600 text-gray-900 dark:text-white rounded px-2 py-1 text-sm"
-                                            />
-                                            <span className="text-xs text-gray-600">days</span>
-                                            <button
-                                                onClick={() => saveDaysBeforeExpiry(pref.eventType)}
-                                                className="px-3 py-1 bg-blue-600 text-gray-900 dark:text-white rounded text-xs hover:bg-blue-700">
-                                                Save
-                                            </button>
-                                            <div className="flex gap-1 ml-2">
-                                                {[90, 60, 30, 14, 7, 1].map(d => (
-                                                    <button
-                                                        key={d}
-                                                        onClick={() => setEditDaysBeforeExpiry({
-                                                            ...editDaysBeforeExpiry,
-                                                            [pref.eventType]: d
-                                                        })}
-                                                        className={`px-2 py-0.5 rounded text-xs border ${
-                                                            (editDaysBeforeExpiry[pref.eventType] ?? pref.daysBeforeExpiry) === d
-                                                                ? 'bg-blue-600 border-blue-500 text-gray-900 dark:text-white'
-                                                                : 'bg-gray-200 dark:bg-gray-700 border-gray-400 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-500'
-                                                        }`}>
-                                                        {d}d
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <DetailField label="Current Recipients" value={pref.recipients || '(uses admin default)'} />
-
-                                <div>
-                                    <label className="text-xs text-gray-600 dark:text-gray-400 block mb-1">Override Recipients (comma-separated emails)</label>
-                                    <div className="flex gap-2">
-                                        <input
-                                            type="text"
-                                            value={editRecipients[pref.eventType] ?? pref.recipients ?? ''}
-                                            onChange={e => handleRecipientsChange(pref.eventType, e.target.value)}
-                                            placeholder="Leave empty to use admin defaults"
-                                            className={`flex-1 bg-gray-200 dark:bg-gray-700 border text-gray-900 dark:text-white rounded px-2 py-1 text-sm ${
-                                                emailErrors[pref.eventType]
-                                                    ? 'border-red-500 focus:border-red-400'
-                                                    : 'border-gray-400 dark:border-gray-600 focus:border-gray-500'
-                                            }`} />
-                                        <button onClick={() => saveRecipients(pref.eventType)}
-                                            className="px-3 py-1 bg-blue-600 text-gray-900 dark:text-white rounded text-xs hover:bg-blue-700">
-                                            Save
-                                        </button>
-                                    </div>
-                                    {emailErrors[pref.eventType] && (
-                                        <p className="text-xs text-red-800 dark:text-red-400 mt-1">{emailErrors[pref.eventType]}</p>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                ))}
+            <div>
+                <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">Configure which events send email notifications and to whom. Select rows to enable, disable, or edit.</p>
+                <DataTable<any>
+                    tableId="notification-prefs"
+                    title="Notification Preferences"
+                    rows={prefs}
+                    rowKey={(p) => p.eventType}
+                    loading={loading}
+                    error={error}
+                    empty="No notification preferences found"
+                    columns={columns}
+                    selectable
+                    bulkActions={bulkActions}
+                    exportFileName="notification-preferences"
+                    renderDrawer={renderDrawer}
+                    drawerTitle={(p) => p.eventType}
+                />
             </div>
 
-            {/* Alert Configuration Section */}
+            {/* Alert Configuration (read-only summary) */}
             <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
                 <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
                     <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Security Alert Configuration</h3>
                     <p className="text-xs text-gray-600 mt-1">Real-time security alerts for high-risk operations. Configured in system config.</p>
                 </div>
-
                 {alertConfigLoading && <div className="p-4 text-gray-600 dark:text-gray-400 text-sm text-center">Loading...</div>}
-
                 {!alertConfigLoading && alertConfig && (
                     <div className="p-4 space-y-3">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -267,73 +193,79 @@ const NotificationManagement: React.FC = () => {
                             </div>
                             <div>
                                 <label className={labelClass}>Minimum Severity</label>
-                                <div className="flex items-center gap-2">
-                                    <span className={`px-2 py-0.5 text-xs rounded border ${
-                                        alertConfig.minimumSeverity === 'Critical'
-                                            ? 'bg-red-50 dark:bg-red-900/40 text-red-800 dark:text-red-300 border-red-300 dark:border-red-700'
-                                            : alertConfig.minimumSeverity === 'Warning'
-                                                ? 'bg-yellow-50 dark:bg-yellow-900/40 text-yellow-800 dark:text-yellow-300 border-yellow-300 dark:border-yellow-700'
-                                                : 'bg-blue-50 dark:bg-blue-900/40 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700'
-                                    }`}>
-                                        {alertConfig.minimumSeverity}
-                                    </span>
-                                </div>
+                                <span className={`px-2 py-0.5 text-xs rounded border ${alertConfig.minimumSeverity === 'Critical' ? 'bg-red-50 dark:bg-red-900/40 text-red-800 dark:text-red-300 border-red-300 dark:border-red-700' : alertConfig.minimumSeverity === 'Warning' ? 'bg-yellow-50 dark:bg-yellow-900/40 text-yellow-800 dark:text-yellow-300 border-yellow-300 dark:border-yellow-700' : 'bg-blue-50 dark:bg-blue-900/40 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700'}`}>{alertConfig.minimumSeverity}</span>
                             </div>
                             <div>
                                 <label className={labelClass}>Cooldown Period</label>
                                 <span className="text-sm text-gray-900 dark:text-white">{alertConfig.cooldownMinutes} minutes</span>
                             </div>
                         </div>
-                        <p className="text-xs text-gray-600 mt-2">
-                            Alert settings are managed through the system configuration (Settings page). Alerts are dispatched via the email notification pipeline.
-                        </p>
+                        <p className="text-xs text-gray-600 mt-2">Alert settings are managed through the system configuration (Settings page).</p>
                     </div>
                 )}
-
-                {!alertConfigLoading && !alertConfig && (
-                    <div className="p-4 text-sm text-gray-600 text-center">
-                        Alert configuration not available. Ensure the system config endpoint is accessible.
-                    </div>
-                )}
+                {!alertConfigLoading && !alertConfig && <div className="p-4 text-sm text-gray-600 text-center">Alert configuration not available.</div>}
             </div>
 
-            {/* Email Configuration Summary */}
+            {/* Email Configuration (read-only summary) */}
             {emailConfig && (
                 <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
                     <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
                         <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Email Configuration</h3>
                         <p className="text-xs text-gray-600 mt-1">SMTP configuration used for sending notification emails.</p>
                     </div>
-                    <div className="p-4 space-y-2">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div><label className={labelClass}>Email Sending</label><StatusBadge status={(emailConfig.Enabled ?? emailConfig.enabled) ? 'enabled' : 'disabled'} /></div>
+                        <div><label className={labelClass}>SMTP Host</label><span className="text-sm text-gray-900 dark:text-white">{emailConfig.SmtpHost ?? emailConfig.smtpHost ?? '-'}</span></div>
+                        <div><label className={labelClass}>SMTP Port</label><span className="text-sm text-gray-900 dark:text-white">{emailConfig.SmtpPort ?? emailConfig.smtpPort ?? '-'}</span></div>
+                        <div><label className={labelClass}>TLS</label><StatusBadge status={(emailConfig.UseTls ?? emailConfig.useTls) ? 'enabled' : 'disabled'} /></div>
+                        <div><label className={labelClass}>From Address</label><span className="text-sm text-gray-900 dark:text-white">{emailConfig.FromAddress ?? emailConfig.fromAddress ?? '-'}</span></div>
+                        <div><label className={labelClass}>Admin Recipients</label><span className="text-sm text-gray-900 dark:text-white">{emailConfig.AdminRecipients ?? emailConfig.adminRecipients ?? '-'}</span></div>
+                    </div>
+                </div>
+            )}
+
+            {/* Single-row Edit modal */}
+            {editTarget && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setEditTarget(null)}>
+                    <div className="bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-xl shadow-2xl w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+                        <div className="px-6 py-4 border-b border-gray-300 dark:border-gray-700 flex items-center justify-between">
+                            <h3 className="text-lg font-bold text-gray-900 dark:text-white">Edit Notification</h3>
+                            <button onClick={() => setEditTarget(null)} className="text-gray-500 hover:text-gray-900 dark:hover:text-white text-xl leading-none">×</button>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <div className="text-sm font-medium text-gray-900 dark:text-white">{editTarget.eventType}</div>
+                            <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                                <input type="checkbox" checked={editForm.enabled} onChange={(e) => setEditForm({ ...editForm, enabled: e.target.checked })} className="h-4 w-4 rounded border-gray-300 dark:border-gray-700 text-blue-600 focus:ring-blue-500" />
+                                Enabled
+                            </label>
+                            {editForm.hasDays && (
+                                <div>
+                                    <label className={labelClass}>Days Before Expiry</label>
+                                    <div className="flex items-center gap-2">
+                                        <input type="text" inputMode="numeric" value={editForm.daysBeforeExpiry}
+                                            onChange={(e) => setEditForm({ ...editForm, daysBeforeExpiry: e.target.value.replace(/\D/g, '') })}
+                                            className="w-24 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 text-gray-900 dark:text-white rounded px-2 py-1 text-sm" />
+                                        <div className="flex gap-1">
+                                            {[90, 60, 30, 14, 7, 1].map((d) => (
+                                                <button key={d} onClick={() => setEditForm({ ...editForm, daysBeforeExpiry: String(d) })}
+                                                    className={`px-2 py-0.5 rounded text-xs border ${editForm.daysBeforeExpiry === String(d) ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-400 hover:border-gray-500'}`}>{d}d</button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
                             <div>
-                                <label className={labelClass}>Email Sending</label>
-                                <StatusBadge status={emailConfig.Enabled ?? emailConfig.enabled ? 'enabled' : 'disabled'} />
-                            </div>
-                            <div>
-                                <label className={labelClass}>SMTP Host</label>
-                                <span className="text-sm text-gray-900 dark:text-white">{emailConfig.SmtpHost ?? emailConfig.smtpHost ?? '-'}</span>
-                            </div>
-                            <div>
-                                <label className={labelClass}>SMTP Port</label>
-                                <span className="text-sm text-gray-900 dark:text-white">{emailConfig.SmtpPort ?? emailConfig.smtpPort ?? '-'}</span>
-                            </div>
-                            <div>
-                                <label className={labelClass}>TLS</label>
-                                <StatusBadge status={(emailConfig.UseTls ?? emailConfig.useTls) ? 'enabled' : 'disabled'} />
-                            </div>
-                            <div>
-                                <label className={labelClass}>From Address</label>
-                                <span className="text-sm text-gray-900 dark:text-white">{emailConfig.FromAddress ?? emailConfig.fromAddress ?? '-'}</span>
-                            </div>
-                            <div>
-                                <label className={labelClass}>Admin Recipients</label>
-                                <span className="text-sm text-gray-900 dark:text-white">{emailConfig.AdminRecipients ?? emailConfig.adminRecipients ?? '-'}</span>
+                                <label className={labelClass}>Override Recipients (comma-separated emails)</label>
+                                <input type="text" value={editForm.recipients} onChange={(e) => { setEditForm({ ...editForm, recipients: e.target.value }); setEditEmailError(validateEmails(e.target.value)); }}
+                                    placeholder="Leave empty to use admin defaults" autoComplete="off" data-1p-ignore data-lpignore="true" data-bwignore
+                                    className={`${inputCls} ${editEmailError ? 'border-red-500' : ''}`} />
+                                {editEmailError && <p className="text-xs text-red-800 dark:text-red-400 mt-1">{editEmailError}</p>}
                             </div>
                         </div>
-                        <p className="text-xs text-gray-600 mt-2">
-                            Email settings are managed through the system configuration (Settings page).
-                        </p>
+                        <div className="px-6 py-4 border-t border-gray-300 dark:border-gray-700 flex justify-end gap-3">
+                            <button onClick={() => setEditTarget(null)} disabled={saving} className="px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600">Cancel</button>
+                            <button onClick={saveEdit} disabled={saving || !!editEmailError} className="px-4 py-2 text-sm font-semibold bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50">{saving ? 'Saving...' : 'Save'}</button>
+                        </div>
                     </div>
                 </div>
             )}

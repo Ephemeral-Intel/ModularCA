@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import { API_BASE } from '../api/client';
+import { createDpopProof } from '../api/dpop';
 import { useAuth } from '../context/AuthContext';
 
 interface MfaVerifyState {
@@ -62,6 +63,9 @@ const MfaVerify: React.FC = () => {
             const csrfMatch = document.cookie.match(/(?:^|;\s*)CSRF-TOKEN=([^;]*)/);
             const csrfHeaders: Record<string, string> = {};
             if (csrfMatch) csrfHeaders['X-CSRF-Token'] = decodeURIComponent(csrfMatch[1]);
+            // Bind the session to this device's PoP key as MFA completes.
+            const totpProof = await createDpopProof('POST', `${API_BASE}/auth/totp/verify`);
+            if (totpProof) csrfHeaders['DPoP'] = totpProof;
             const resp = await fetch(`${API_BASE}/auth/totp/verify`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...csrfHeaders },
@@ -161,7 +165,9 @@ const MfaVerify: React.FC = () => {
 
             const assertionResponse = credential.response as AuthenticatorAssertionResponse;
 
-            // Send assertion to server
+            // Send assertion to server (bind the session to this device's PoP key on success).
+            const waProof = await createDpopProof('POST', `${API_BASE}/auth/webauthn/assertion`);
+            if (waProof) csrfHeaders['DPoP'] = waProof;
             const verifyResp = await fetch(`${API_BASE}/auth/webauthn/assertion`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...csrfHeaders },

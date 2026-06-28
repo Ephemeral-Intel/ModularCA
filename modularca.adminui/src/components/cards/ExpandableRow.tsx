@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import Chevron from '../Chevron';
 
 interface Action {
     label: string;
@@ -52,7 +53,7 @@ export default function ExpandableRow<T>({
                     {renderSummary(item)}
                 </div>
                 <span className="text-gray-600 dark:text-gray-400 ml-2 text-xs">
-                    {isExpanded ? '\u25B2' : '\u25BC'}
+                    <Chevron direction={(isExpanded) ? 'up' : 'down'} className="w-3 h-3" />
                 </span>
             </div>
 

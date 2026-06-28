@@ -56,31 +56,36 @@ public class AdminSshController(ISshCaService sshCaService, ICurrentUserService 
         if (!await MfaStepUpController.ValidateStepUpTokenAsync(cache, User, mfaToken, StepUpOps.CreateSshCa))
             return StatusCode(403, new { error = "MFA re-verification required.", requiresStepUp = true });
 
-        if (request.TenantId.HasValue)
+        // SSH CA keys are ALWAYS created under the System tenant (see SshCaService.GenerateKeyPairAsync,
+        // which ignores request.TenantId entirely). The ceremony requirement must therefore be
+        // evaluated against the System tenant — the tenant the key actually lands in — NOT
+        // request.TenantId. Keying the gate off request.TenantId allowed an SSH CA to be created
+        // directly, bypassing the ceremony, whenever the request omitted a ceremony-requiring tenant
+        // (e.g. sent no TenantId at all): the gate was skipped but the key was still minted into the
+        // System tenant, which requires ceremonies. We now resolve the System tenant up front and gate
+        // on its flag so the bypass is closed.
+        var sshTenant = await db.Tenants.AsNoTracking().FirstOrDefaultAsync(t => t.IsSystemTenant);
+        if (sshTenant?.RequireKeyCeremony == true)
         {
-            var tenant = await db.Tenants.AsNoTracking().FirstOrDefaultAsync(t => t.Id == request.TenantId.Value);
-            if (tenant?.RequireKeyCeremony == true)
+            var sshParams = new SshKeyCeremonyParameters
             {
-                var sshParams = new SshKeyCeremonyParameters
-                {
-                    Name = request.Name,
-                    KeyType = request.KeyType ?? "ed25519",
-                    KeySize = request.KeySize,
-                    IsUserCa = request.IsUserCa ?? true,
-                    IsHostCa = request.IsHostCa ?? false,
-                    MaxValidityHours = request.MaxValidityHours ?? 24,
-                    TenantId = tenant.Id
-                };
-                var ceremony = await ceremonySvc.InitiateAsync(
-                    "CreateSshCa",
-                    $"Create SSH CA '{request.Name}'",
-                    string.Empty,
-                    currentUser.User.Id,
-                    currentUser.User.Username ?? string.Empty,
-                    JsonSerializer.Serialize(sshParams));
-                return Ok(new { requiresCeremony = true, ceremonyId = ceremony.Id, ceremony.Status, ceremony.RequiredApprovals,
-                    message = $"Key ceremony required. {ceremony.RequiredApprovals} approval(s) needed." });
-            }
+                Name = request.Name,
+                KeyType = request.KeyType ?? "ed25519",
+                KeySize = request.KeySize,
+                IsUserCa = request.IsUserCa ?? true,
+                IsHostCa = request.IsHostCa ?? false,
+                MaxValidityHours = request.MaxValidityHours ?? 24,
+                TenantId = sshTenant.Id
+            };
+            var ceremony = await ceremonySvc.InitiateAsync(
+                "CreateSshCa",
+                $"Create SSH CA '{request.Name}'",
+                string.Empty,
+                currentUser.User.Id,
+                currentUser.User.Username ?? string.Empty,
+                JsonSerializer.Serialize(sshParams));
+            return Ok(new { requiresCeremony = true, ceremonyId = ceremony.Id, ceremony.Status, ceremony.RequiredApprovals,
+                message = $"Key ceremony required. {ceremony.RequiredApprovals} approval(s) needed." });
         }
 
         var key = await sshCaService.GenerateKeyPairAsync(

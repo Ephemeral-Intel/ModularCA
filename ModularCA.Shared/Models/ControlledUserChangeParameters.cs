@@ -59,6 +59,9 @@ public class ControlledUserChangeParameters
 
     /// <summary>CA scope of the affected tier (null for system-scoped tiers).</summary>
     public Guid? MintedTierCaId { get; set; }
+
+    /// <summary>Tenant scope of the affected tier (set for org- and CA-scoped tiers; null for system).</summary>
+    public Guid? MintedTierTenantId { get; set; }
 }
 
 /// <summary>Summary returned by applying a controlled-user ceremony, for audit detail.</summary>

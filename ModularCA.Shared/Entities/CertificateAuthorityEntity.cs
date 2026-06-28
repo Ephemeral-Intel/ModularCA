@@ -122,6 +122,14 @@ namespace ModularCA.Shared.Entities
         public virtual TenantEntity Tenant { get; set; } = default!;
 
         /// <summary>
+        /// Optional per-CA override for the controlled-user ceremony ("user") quorum — how many
+        /// approvals a promote/demote/delete of a CA-scoped controlled user requires. Null = inherit
+        /// the owning tenant's value. Capped by the tenant (a CA may require fewer approvals than its
+        /// tenant, never more). Distinct from the CA admin group's <i>key</i>-ceremony quorum.
+        /// </summary>
+        public int? UserCeremonyRequiredApprovals { get; set; }
+
+        /// <summary>
         /// Optimistic concurrency token. Mapped to MySQL TIMESTAMP(6)
         /// via <c>IsRowVersion()</c> in <see cref="ModularCA.Database.ModularCADbContext"/>,
         /// auto-updated on every row UPDATE. Concurrent edits raise

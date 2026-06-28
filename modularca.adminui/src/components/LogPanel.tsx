@@ -1,32 +1,56 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import Chevron from './Chevron';
 import { apiGet } from '../api/client';
+import { useTablePrefs } from '../hooks/useTablePrefs';
 
 const MIN_HEIGHT = 36;
 const DEFAULT_HEIGHT = 220;
 const MAX_HEIGHT_RATIO = 0.6;
 
+// Per-source badge styling. Network is intentionally omitted — those events are not
+// surfaced in this panel (see fetchLogs).
+const SOURCE_STYLES: Record<string, string> = {
+    App: 'text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800',
+    EST: 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-900/30',
+    SCEP: 'text-orange-700 dark:text-orange-300 bg-orange-50 dark:bg-orange-900/30',
+    CMP: 'text-cyan-700 dark:text-cyan-300 bg-cyan-50 dark:bg-cyan-900/30',
+    ACME: 'text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/30',
+};
+
+interface PanelPrefs {
+    height: number;
+    collapsed: boolean;
+}
+
 const LogPanel: React.FC = () => {
-    const [height, setHeight] = useState(DEFAULT_HEIGHT);
-    const [collapsed, setCollapsed] = useState(true);
+    // Sizing + open/closed state persist per-user (localStorage fast path + cross-device backend sync).
+    const [prefs, setPrefs] = useTablePrefs<PanelPrefs>('panel:events', { height: DEFAULT_HEIGHT, collapsed: true });
+    const collapsed = prefs.collapsed;
+
+    // Live height during a drag — committed to prefs only on mouse-up so we don't write
+    // localStorage / PUT the backend on every mousemove.
+    const [liveHeight, setLiveHeight] = useState<number | null>(null);
+    const height = liveHeight ?? prefs.height;
+
     const [logs, setLogs] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
     const [autoRefresh, setAutoRefresh] = useState(true);
     const [filter, setFilter] = useState('');
     const [selectedLog, setSelectedLog] = useState<any>(null);
     const panelRef = useRef<HTMLDivElement>(null);
-    const dragRef = useRef<{ startY: number; startH: number } | null>(null);
+    const dragRef = useRef<{ startY: number; startH: number; latest: number } | null>(null);
     const bottomRef = useRef<HTMLDivElement>(null);
 
     const fetchLogs = useCallback(async () => {
         setLoading(true);
         try {
-            const [general, est, scep, cmp, acme, network] = await Promise.all([
+            // Network audit is intentionally NOT fetched — those events are excluded from this panel.
+            const [general, est, scep, cmp, acme] = await Promise.all([
                 apiGet<any>('/api/v1/admin/audit?pageSize=50').catch(() => ({ items: [] })),
                 apiGet<any>('/api/v1/admin/audit/est?pageSize=50').catch(() => ({ items: [] })),
                 apiGet<any>('/api/v1/admin/audit/scep?pageSize=50').catch(() => ({ items: [] })),
                 apiGet<any>('/api/v1/admin/audit/cmp?pageSize=50').catch(() => ({ items: [] })),
                 apiGet<any>('/api/v1/admin/audit/acme?pageSize=50').catch(() => ({ items: [] })),
-                apiGet<any>('/api/v1/admin/audit/network?pageSize=50').catch(() => ({ items: [] })),
             ]);
 
             const tagged = [
@@ -35,7 +59,6 @@ const LogPanel: React.FC = () => {
                 ...(scep.items || []).map((l: any) => ({ ...l, _source: 'SCEP', _action: l.operation, _actor: l.subjectDN })),
                 ...(cmp.items || []).map((l: any) => ({ ...l, _source: 'CMP', _action: l.messageType || l.operation, _actor: l.subjectDN })),
                 ...(acme.items || []).map((l: any) => ({ ...l, _source: 'ACME', _action: l.operation, _actor: l.subjectDN || (l.accountId ? `acct:${l.accountId.substring(0, 8)}` : '') })),
-                ...(network.items || []).map((l: any) => ({ ...l, _source: 'Network', _action: l.reason, _actor: l.sourceIp, success: false })),
             ];
 
             tagged.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -58,32 +81,35 @@ const LogPanel: React.FC = () => {
         }
     }, [collapsed, autoRefresh, fetchLogs]);
 
-    const onMouseDown = (e: React.MouseEvent) => {
-        e.preventDefault();
-        dragRef.current = { startY: e.clientY, startH: height };
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-    };
-
     const onMouseMove = useCallback((e: MouseEvent) => {
         if (!dragRef.current) return;
         const maxH = window.innerHeight * MAX_HEIGHT_RATIO;
         const delta = dragRef.current.startY - e.clientY;
         const newH = Math.min(maxH, Math.max(MIN_HEIGHT + 40, dragRef.current.startH + delta));
-        setHeight(newH);
+        dragRef.current.latest = newH;
+        setLiveHeight(newH);
     }, []);
 
     const onMouseUp = useCallback(() => {
-        dragRef.current = null;
+        const finalH = dragRef.current?.latest;
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
-    }, [onMouseMove]);
+        dragRef.current = null;
+        setLiveHeight(null);
+        // Persist the final height (the panel is necessarily open while dragging).
+        if (finalH != null) setPrefs({ collapsed: false, height: finalH });
+    }, [onMouseMove, setPrefs]);
 
+    const onMouseDown = (e: React.MouseEvent) => {
+        e.preventDefault();
+        dragRef.current = { startY: e.clientY, startH: height, latest: height };
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    };
+
+    // Toggling open/closed persists immediately; the persisted height is preserved on re-open.
     const toggleCollapse = () => {
-        if (collapsed) {
-            setHeight(DEFAULT_HEIGHT);
-        }
-        setCollapsed(!collapsed);
+        setPrefs({ ...prefs, collapsed: !collapsed });
     };
 
     const formatTime = (ts: string) => {
@@ -106,6 +132,8 @@ const LogPanel: React.FC = () => {
         )
         : logs;
 
+    const thClass = 'px-2 py-1 text-left font-medium select-none';
+
     return (
         <div
             ref={panelRef}
@@ -123,7 +151,7 @@ const LogPanel: React.FC = () => {
             {/* Header bar */}
             <div className="flex items-center justify-between px-3 py-1.5 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
                 <button onClick={toggleCollapse} className="flex items-center gap-2 text-xs font-semibold text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors">
-                    <span>{collapsed ? '\u25B2' : '\u25BC'}</span>
+                    <span><Chevron direction={(collapsed) ? 'up' : 'down'} className="w-3 h-3" /></span>
                     <span>Events</span>
                     {logs.length > 0 && (
                         <span className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[10px] text-gray-600">{logs.length}</span>
@@ -153,7 +181,7 @@ const LogPanel: React.FC = () => {
                             disabled={loading}
                             className="text-[10px] text-gray-600 hover:text-gray-900 dark:hover:text-white transition-colors"
                         >
-                            {loading ? '\u27F3' : '\u21BB'} Refresh
+                            {loading ? '⟳' : '↻'} Refresh
                         </button>
                     </div>
                 )}
@@ -161,59 +189,69 @@ const LogPanel: React.FC = () => {
 
             {/* Log entries */}
             {!collapsed && (
-                <div className="flex-1 overflow-auto font-mono text-[11px] leading-relaxed">
-                    {filteredLogs.length === 0 && !loading && (
-                        <div className="p-3 text-xs text-gray-600 text-center">No events</div>
-                    )}
-                    <table className="w-full min-w-[600px]">
-                        <tbody>
-                            {filteredLogs.map((log) => {
-                                const sourceColors: Record<string, string> = {
-                                    App: 'text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-800',
-                                    EST: 'text-emerald-400 bg-emerald-900/30',
-                                    SCEP: 'text-orange-800 dark:text-orange-400 bg-orange-50 dark:bg-orange-900/30',
-                                    CMP: 'text-cyan-400 bg-cyan-900/30',
-                                    ACME: 'text-purple-400 bg-purple-900/30',
-                                    Network: 'text-red-800 dark:text-red-400 bg-red-50 dark:bg-red-900/30',
-                                };
-                                return (
-                                <tr
-                                    key={log.id}
-                                    onClick={() => setSelectedLog(selectedLog?.id === log.id ? null : log)}
-                                    className={`cursor-pointer border-b border-gray-900 transition-colors ${
-                                        selectedLog?.id === log.id ? 'bg-gray-100 dark:bg-gray-800' : 'hover:bg-gray-50/50 dark:hover:bg-gray-900/50'
-                                    }`}
-                                >
-                                    <td className="px-2 py-1 text-gray-600 whitespace-nowrap w-[130px]">
-                                        {formatDate(log.timestamp)}
-                                    </td>
-                                    <td className="px-2 py-1 whitespace-nowrap w-[18px]">
-                                        {log.success
-                                            ? <span className="text-green-500">{'\u2713'}</span>
-                                            : <span className="text-red-800 dark:text-red-400">{'\u2717'}</span>
-                                        }
-                                    </td>
-                                    <td className="px-1 py-1 whitespace-nowrap w-[50px]">
-                                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${sourceColors[log._source] || 'text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-800'}`}>
-                                            {log._source}
-                                        </span>
-                                    </td>
-                                    <td className="px-2 py-1 text-blue-800 dark:text-blue-400 whitespace-nowrap w-[100px] truncate">
-                                        {log._actor || '-'}
-                                    </td>
-                                    <td className="px-2 py-1 text-yellow-800 dark:text-yellow-300 whitespace-nowrap w-[160px]">
-                                        {log._action}
-                                    </td>
-                                    <td className="px-2 py-1 text-gray-600 dark:text-gray-400 truncate max-w-[200px]">
-                                        {log._source === 'App'
-                                            ? `${log.targetEntityType || ''}${log.targetEntityId ? ` ${log.targetEntityId.substring(0, 8)}` : ''}`
-                                            : (log.certificateSerial || log.caLabel || '')
-                                        }
-                                    </td>
-                                    <td className="px-2 py-1 text-gray-600 whitespace-nowrap w-[100px]">
-                                        {log.sourceIp}
+                <div className="flex-1 overflow-auto text-[11px]">
+                    <table className="w-full min-w-[640px] border-collapse">
+                        <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-gray-900/95 backdrop-blur text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-500">
+                            <tr className="border-b border-gray-200 dark:border-gray-800">
+                                <th className={`${thClass} w-[130px]`}>Time</th>
+                                <th className="px-1 py-1 text-center font-medium w-[24px]" aria-label="Status" />
+                                <th className={`${thClass} w-[56px]`}>Source</th>
+                                <th className={`${thClass} w-[110px]`}>Actor</th>
+                                <th className={`${thClass} w-[170px]`}>Action</th>
+                                <th className={thClass}>Target</th>
+                                <th className={`${thClass} w-[110px]`}>IP</th>
+                            </tr>
+                        </thead>
+                        <tbody className="font-mono">
+                            {filteredLogs.length === 0 && !loading && (
+                                <tr>
+                                    <td colSpan={7} className="px-3 py-4 text-center text-gray-500 dark:text-gray-500 font-sans">
+                                        No events
                                     </td>
                                 </tr>
+                            )}
+                            {filteredLogs.map((log) => {
+                                const isSelected = selectedLog?.id === log.id;
+                                return (
+                                    <tr
+                                        key={log.id}
+                                        onClick={() => setSelectedLog(isSelected ? null : log)}
+                                        className={`cursor-pointer border-b border-gray-100 dark:border-gray-800/60 transition-colors ${
+                                            isSelected
+                                                ? 'bg-blue-50 dark:bg-blue-900/20'
+                                                : 'hover:bg-gray-50 dark:hover:bg-gray-900/50'
+                                        }`}
+                                    >
+                                        <td className="px-2 py-1 text-gray-500 dark:text-gray-500 whitespace-nowrap">
+                                            {formatDate(log.timestamp)}
+                                        </td>
+                                        <td className="px-1 py-1 text-center whitespace-nowrap">
+                                            {log.success
+                                                ? <span className="text-green-600 dark:text-green-500">{'✓'}</span>
+                                                : <span className="text-red-600 dark:text-red-400">{'✗'}</span>
+                                            }
+                                        </td>
+                                        <td className="px-1 py-1 whitespace-nowrap">
+                                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold font-sans ${SOURCE_STYLES[log._source] || SOURCE_STYLES.App}`}>
+                                                {log._source}
+                                            </span>
+                                        </td>
+                                        <td className="px-2 py-1 text-blue-700 dark:text-blue-400 whitespace-nowrap max-w-[110px] truncate">
+                                            {log._actor || '-'}
+                                        </td>
+                                        <td className="px-2 py-1 text-amber-700 dark:text-yellow-300 whitespace-nowrap max-w-[170px] truncate">
+                                            {log._action}
+                                        </td>
+                                        <td className="px-2 py-1 text-gray-600 dark:text-gray-400 truncate max-w-[220px]">
+                                            {log._source === 'App'
+                                                ? `${log.targetEntityType || ''}${log.targetEntityId ? ` ${log.targetEntityId.substring(0, 8)}` : ''}`
+                                                : (log.certificateSerial || log.caLabel || '')
+                                            }
+                                        </td>
+                                        <td className="px-2 py-1 text-gray-500 dark:text-gray-500 whitespace-nowrap">
+                                            {log.sourceIp}
+                                        </td>
+                                    </tr>
                                 );
                             })}
                         </tbody>
@@ -224,35 +262,14 @@ const LogPanel: React.FC = () => {
                         <div className="border-t border-gray-300 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 px-3 py-2 space-y-1">
                             <div className="flex justify-between items-start">
                                 <span className="text-xs font-semibold text-gray-900 dark:text-white">{selectedLog._source}: {selectedLog._action}</span>
-                                <button onClick={() => setSelectedLog(null)} className="text-gray-600 hover:text-gray-900 dark:hover:text-white text-xs">{'\u2715'}</button>
+                                <button onClick={() => setSelectedLog(null)} className="text-gray-600 hover:text-gray-900 dark:hover:text-white text-xs">{'✕'}</button>
                             </div>
                             <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[11px]">
                                 <span className="text-gray-600">Source</span>
                                 <span className="text-gray-700 dark:text-gray-300">{selectedLog._source}</span>
                                 <span className="text-gray-600">Timestamp</span>
                                 <span className="text-gray-700 dark:text-gray-300">{new Date(selectedLog.timestamp).toISOString()}</span>
-                                {selectedLog._source === 'Network' ? (
-                                    <>
-                                        <span className="text-gray-600">Source IP</span>
-                                        <span className="text-red-800 dark:text-red-300 font-mono">{selectedLog.sourceIp}</span>
-                                        <span className="text-gray-600">Method</span>
-                                        <span className="text-gray-700 dark:text-gray-300">{selectedLog.httpMethod}</span>
-                                        <span className="text-gray-600">Path</span>
-                                        <span className="text-gray-700 dark:text-gray-300">{selectedLog.requestPath}</span>
-                                        <span className="text-gray-600">Protocol</span>
-                                        <span className="text-gray-700 dark:text-gray-300">{selectedLog.protocol || '-'}</span>
-                                        {selectedLog.caLabel && (
-                                            <>
-                                                <span className="text-gray-600">CA Label</span>
-                                                <span className="text-gray-700 dark:text-gray-300">{selectedLog.caLabel}</span>
-                                            </>
-                                        )}
-                                        <span className="text-gray-600">Reason</span>
-                                        <span className="text-red-800 dark:text-red-400">{selectedLog.reason}</span>
-                                        <span className="text-gray-600">User Agent</span>
-                                        <span className="text-gray-700 dark:text-gray-300">{selectedLog.userAgent || '-'}</span>
-                                    </>
-                                ) : selectedLog._source === 'App' ? (
+                                {selectedLog._source === 'App' ? (
                                     <>
                                         <span className="text-gray-600">Actor</span>
                                         <span className="text-blue-800 dark:text-blue-400">{selectedLog.actorUsername || '-'}</span>

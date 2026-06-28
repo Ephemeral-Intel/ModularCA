@@ -444,7 +444,8 @@ namespace ModularCA.API.Controllers.v1.Auth
             var groups = userGroups;
             var (Token, ExpiresAt) = _jwt.GenerateToken(user, groups, sourceIp, mfaSetupRequired: mfaSetupRequired);
             var userAgentHash = ModularCA.Auth.Utils.FingerprintUtil.ComputeUserAgentHash(Request.Headers.UserAgent.ToString());
-            var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, userAgentHash);
+            var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, userAgentHash,
+                await HttpContext.RequestServices.GetRequiredService<ModularCA.Auth.Services.IDpopProofService>().GetValidatedJktAsync(HttpContext));
             var refreshPlaintext = refreshToken.PlaintextTokenForClient ?? refreshToken.Token;
 
             user.FailedLoginAttempts = 0;
@@ -519,12 +520,41 @@ namespace ModularCA.API.Controllers.v1.Auth
             // Refresh tokens are stored SHA-256 hashed — hash before lookup.
             var hashedIncoming = JwtTokenService.HashRefreshToken(request.RefreshToken);
 
+            // Look up regardless of revoked status so genuine reuse (a replayed, already-rotated
+            // token) can be told apart from an unknown token, just below.
             var stored = await _db.RefreshTokens
                 .Include(x => x.User)
-                .FirstOrDefaultAsync(x => x.Token == hashedIncoming && !x.IsRevoked);
+                .FirstOrDefaultAsync(x => x.Token == hashedIncoming);
 
             if (stored == null || stored.ExpiresAt < DateTime.UtcNow)
                 return Unauthorized(new { error = "Invalid or expired refresh token" });
+
+            // Refresh-token reuse detection (rotation). A token that is already REVOKED is being
+            // replayed — the client already rotated it, or a stolen copy is in use. If it belonged to
+            // a rotation family, revoke the whole family (fail safe). This fires only on genuine replay
+            // of a spent token — NOT on every post-rotation refresh. (Previously a normally-revoked
+            // predecessor tripped a "any revoked sibling" check, breaking the 2nd refresh of every
+            // session; that check is removed below.)
+            if (stored.IsRevoked)
+            {
+                if (stored.FamilyId.HasValue)
+                {
+                    var familyTokens = await _db.RefreshTokens
+                        .Where(t => t.FamilyId == stored.FamilyId && !t.IsRevoked)
+                        .ToListAsync();
+                    foreach (var t in familyTokens)
+                    {
+                        t.IsRevoked = true;
+                        t.RevokedAt = DateTime.UtcNow;
+                    }
+                    await _db.SaveChangesAsync();
+                    await _audit.LogAsync(AuditActionType.UserLoginFailed, stored.UserId, stored.User?.Username,
+                        sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString(), success: false,
+                        errorMessage: $"Refresh token reuse detected in family {stored.FamilyId} — all tokens revoked");
+                    return Unauthorized(new { error = "Token family compromised. Please log in again." });
+                }
+                return Unauthorized(new { error = "Invalid or expired refresh token" });
+            }
 
             // Absolute session lifetime cap based on the original family's
             // CreatedAt. Refresh rotation must not extend a session beyond this horizon.
@@ -564,33 +594,6 @@ namespace ModularCA.API.Controllers.v1.Auth
                 return StatusCode(403, new { error = "Account is locked or disabled" });
             }
 
-            // Refresh token family detection — if any sibling in this rotation chain
-            // has already been revoked (and it isn't the token we are currently consuming),
-            // a stolen token is being replayed. Revoke the entire family.
-            if (stored.FamilyId.HasValue)
-            {
-                var familyRevoked = await _db.RefreshTokens
-                    .AnyAsync(t => t.FamilyId == stored.FamilyId && t.IsRevoked && t.Id != stored.Id);
-                if (familyRevoked)
-                {
-                    var familyTokens = await _db.RefreshTokens
-                        .Where(t => t.FamilyId == stored.FamilyId)
-                        .ToListAsync();
-                    foreach (var t in familyTokens)
-                    {
-                        t.IsRevoked = true;
-                        t.RevokedAt = DateTime.UtcNow;
-                    }
-                    await _db.SaveChangesAsync();
-
-                    await _audit.LogAsync(AuditActionType.UserLoginFailed, stored.UserId, user.Username,
-                        sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString(), success: false,
-                        errorMessage: $"Refresh token family {stored.FamilyId} compromised — all tokens revoked");
-
-                    return Unauthorized(new { error = "Token family compromised. Please log in again." });
-                }
-            }
-
             var groups = await _db.CaGroupMembers
                 .Where(gm => gm.UserId == user.Id)
                 .Include(gm => gm.Group)
@@ -607,18 +610,11 @@ namespace ModularCA.API.Controllers.v1.Auth
 
             if (_config.Security.BindRefreshTokenToIp && stored.CreatedByIp != null && currentIpStr != stored.CreatedByIp)
             {
-                if (!_config.Security.AllowRefreshTokenMismatch)
-                {
-                    await _audit.LogAsync(AuditActionType.UserLoginFailed, stored.UserId, user.Username,
-                        sourceIp: currentIpStr, success: false, errorMessage: $"Refresh token IP mismatch: expected {stored.CreatedByIp}, got {currentIpStr}");
-                    stored.IsRevoked = true;
-                    stored.RevokedAt = DateTime.UtcNow;
-                    await _db.SaveChangesAsync();
-                    return Unauthorized(new { error = "Session invalid: IP address changed", code = "REFRESH_IP_MISMATCH" });
-                }
-                // Log-only mode
+                // IP is an audit signal only — refresh-token theft is defended by DPoP proof-of-
+                // possession (CnfJkt below) plus rotation/family-reuse detection, NOT by IP pinning,
+                // which breaks legitimate dual-stack (IPv4/IPv6) and roaming clients. Never revoke here.
                 await _audit.LogAsync(AuditActionType.UserLoginFailed, stored.UserId, user.Username,
-                    sourceIp: currentIpStr, success: true, errorMessage: $"Refresh token IP mismatch (allowed): expected {stored.CreatedByIp}, got {currentIpStr}");
+                    sourceIp: currentIpStr, success: true, errorMessage: $"Refresh token IP changed (allowed): expected {stored.CreatedByIp}, got {currentIpStr}");
             }
 
             if (_config.Security.BindRefreshTokenToFingerprint && stored.UserAgentHash != null)
@@ -640,6 +636,35 @@ namespace ModularCA.API.Controllers.v1.Auth
                 }
             }
 
+            // DPoP proof-of-possession enforcement (refresh-only). When this session was bound to a
+            // client key at issuance (CnfJkt set), rotation requires a valid proof signed by that
+            // non-extractable key — so a stolen refresh token alone cannot be used to keep the session
+            // alive. Soft rollout: unbound (legacy/non-PoP) sessions skip the check until they expire.
+            var dpopSvc = HttpContext.RequestServices.GetRequiredService<ModularCA.Auth.Services.IDpopProofService>();
+            var proofJkt = await dpopSvc.GetValidatedJktAsync(HttpContext, HttpContext.RequestAborted);
+            if (!string.IsNullOrEmpty(stored.CnfJkt))
+            {
+                var popOk = proofJkt != null && string.Equals(proofJkt, stored.CnfJkt, StringComparison.Ordinal);
+                if (!popOk)
+                {
+                    // Short prefixes only — thumbprints aren't secret but keep the audit log terse.
+                    var got = proofJkt == null ? "none" : proofJkt[..Math.Min(12, proofJkt.Length)];
+                    var exp = stored.CnfJkt[..Math.Min(12, stored.CnfJkt.Length)];
+                    var kind = proofJkt == null ? "missing" : "mismatch";
+                    if (_config.Security.EnforceRefreshTokenPoP)
+                    {
+                        await _audit.LogAsync(AuditActionType.UserLoginFailed, stored.UserId, user.Username,
+                            sourceIp: currentIpStr, success: false,
+                            errorMessage: $"Refresh PoP {kind} (enforced): expected {exp}, got {got}");
+                        return Unauthorized(new { error = "Proof of possession required for this session", code = "REFRESH_POP_INVALID" });
+                    }
+                    // Observe mode: log and allow; the binding follows the presented key below.
+                    await _audit.LogAsync(AuditActionType.UserLoginFailed, stored.UserId, user.Username,
+                        sourceIp: currentIpStr, success: true,
+                        errorMessage: $"Refresh PoP {kind} (observe — allowed): expected {exp}, got {got}");
+                }
+            }
+
             // Preserve MFA setup requirement on refreshed tokens
             var hasTotp = await _db.TotpSecrets.AnyAsync(t => t.UserId == user.Id && t.IsVerified);
             var hasWebAuthn = await _db.Fido2Credentials.AnyAsync(c => c.UserId == user.Id);
@@ -653,7 +678,10 @@ namespace ModularCA.API.Controllers.v1.Auth
 
             var newAccessToken = _jwt.GenerateToken(user, groups, sourceIp, mfaSetupRequired: mfaSetupNeeded);
             var currentUaHashForNew = ModularCA.Auth.Utils.FingerprintUtil.ComputeUserAgentHash(Request.Headers.UserAgent.ToString());
-            var newRefreshToken = _jwt.GenerateRefreshToken(stored.UserId, sourceIp, currentUaHashForNew);
+            // Bind the rotated token to the key the client just proved possession of (or keep the
+            // existing binding when this refresh carried no proof). This also upgrades legacy unbound
+            // sessions, and — in observe mode — lets the binding settle on the client's actual key.
+            var newRefreshToken = _jwt.GenerateRefreshToken(stored.UserId, sourceIp, currentUaHashForNew, proofJkt ?? stored.CnfJkt);
             newRefreshToken.FamilyId = stored.FamilyId;
             // Propagate the ORIGINAL family creation timestamp so the
             // absolute session cap is measured from the first login, not from each rotation.
@@ -981,7 +1009,8 @@ namespace ModularCA.API.Controllers.v1.Auth
                 .ToListAsync();
             var (Token, ExpiresAt) = _jwt.GenerateToken(user, groups, sourceIp);
             var certUserAgentHash = ModularCA.Auth.Utils.FingerprintUtil.ComputeUserAgentHash(Request.Headers.UserAgent.ToString());
-            var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, certUserAgentHash);
+            var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, certUserAgentHash,
+                await HttpContext.RequestServices.GetRequiredService<ModularCA.Auth.Services.IDpopProofService>().GetValidatedJktAsync(HttpContext));
             var certRefreshPlaintext = refreshToken.PlaintextTokenForClient ?? refreshToken.Token;
 
             user.LastLoginAt = DateTime.UtcNow;

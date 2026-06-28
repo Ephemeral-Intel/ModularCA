@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Database;
+using ModularCA.Shared.Entities;
+using System.Text.Json;
 
 namespace ModularCA.API.Controllers.v1.Account
 {
@@ -48,11 +50,16 @@ namespace ModularCA.API.Controllers.v1.Account
                     displayName = gm.Group.DisplayName,
                     templateName = gm.Group.TemplateName ?? "Custom",
                     isSystemGroup = gm.Group.IsSystemGroup,
+                    isSystemTierSuper = gm.Group.IsSystemTierSuper,
                     certificateAuthorityId = gm.Group.CertificateAuthorityId,
                     caLabel = gm.Group.CertificateAuthority != null ? gm.Group.CertificateAuthority.Label : null,
                     tenantId = gm.Group.TenantId,
                 })
                 .ToListAsync();
+
+            // Whether the caller is a system super-administrator (member of an IsSystemTierSuper group).
+            // The SPA uses this to gate super-only controls (e.g. the System approval-quorum card).
+            var isSuper = groups.Any(g => g.isSystemTierSuper);
 
             // Effective scopes — flat list of strings the SPA can use for ProtectedRoute
             // checks. Format: "system:Admin", "system:Operator", "ca:<caId>:Admin", etc.
@@ -90,6 +97,7 @@ namespace ModularCA.API.Controllers.v1.Account
                 firstName = user.FirstName,
                 lastName = user.LastName,
                 isActive = user.IsActive,
+                isSuper,
                 groups,
                 scopes,
                 mfa = new
@@ -199,6 +207,74 @@ namespace ModularCA.API.Controllers.v1.Account
                 RoleAssignments = roleAssignments,
                 GroupMemberships = groupMemberships
             });
+        }
+
+        /// <summary>
+        /// Returns all of the calling user's stored UI preferences as a map of key → JSON value.
+        /// Client features (e.g. the table component) read this once on load to hydrate their
+        /// cross-device state; the localStorage copy is the fast path used before this resolves.
+        /// </summary>
+        [HttpGet("preferences")]
+        public async Task<IActionResult> GetPreferences()
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+
+            var rows = await _db.UserPreferences
+                .AsNoTracking()
+                .Where(p => p.UserId == _currentUser.User.Id)
+                .ToListAsync();
+
+            // Project each stored ValueJson back into live JSON so the response is a nested object,
+            // not a map of escaped strings. Skip rows whose value somehow isn't valid JSON.
+            var result = new Dictionary<string, JsonElement>();
+            foreach (var row in rows)
+            {
+                try { result[row.Key] = JsonSerializer.Deserialize<JsonElement>(row.ValueJson); }
+                catch (JsonException) { /* ignore corrupt row */ }
+            }
+            return Ok(result);
+        }
+
+        /// <summary>
+        /// Upserts a single UI preference for the calling user. The body is an opaque JSON value
+        /// owned by the client feature (stored verbatim). Used to sync table column layouts across
+        /// browsers/devices.
+        /// </summary>
+        /// <param name="key">App-defined preference key, e.g. "table:certificates" (max 200 chars).</param>
+        /// <param name="value">The JSON value to store for this key.</param>
+        [HttpPut("preferences/{key}")]
+        public async Task<IActionResult> PutPreference(string key, [FromBody] JsonElement value)
+        {
+            await _currentUser.EnsureLoadedAsync();
+            if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+                return Unauthorized();
+
+            if (string.IsNullOrWhiteSpace(key) || key.Length > 200)
+                return BadRequest(new { error = "Preference key is required and must be 200 characters or fewer." });
+
+            var userId = _currentUser.User.Id;
+            var json = value.GetRawText();
+
+            var existing = await _db.UserPreferences.FirstOrDefaultAsync(p => p.UserId == userId && p.Key == key);
+            if (existing == null)
+            {
+                _db.UserPreferences.Add(new UserPreferenceEntity
+                {
+                    UserId = userId,
+                    Key = key,
+                    ValueJson = json,
+                    UpdatedAt = DateTime.UtcNow
+                });
+            }
+            else
+            {
+                existing.ValueJson = json;
+                existing.UpdatedAt = DateTime.UtcNow;
+            }
+            await _db.SaveChangesAsync();
+            return NoContent();
         }
     }
 }

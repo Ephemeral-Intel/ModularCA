@@ -62,6 +62,15 @@ namespace ModularCA.Shared.Entities
         public string? UserAgentHash { get; set; }
 
         /// <summary>
+        /// JWK SHA-256 thumbprint (RFC 7638, base64url) of the client's non-extractable WebCrypto
+        /// public key, binding this refresh token to proof-of-possession (DPoP-style). When set, the
+        /// <c>/auth/refresh</c> endpoint requires a valid DPoP proof signed by the matching private
+        /// key — so a stolen refresh token is useless without the key that can't be exfiltrated.
+        /// Null for sessions created before PoP enrollment (soft rollout) or by non-PoP clients.
+        /// </summary>
+        public string? CnfJkt { get; set; }
+
+        /// <summary>
         /// Last time this session was active (token refresh or API call).
         /// </summary>
         public DateTime LastActivityAt { get; set; } = DateTime.UtcNow;

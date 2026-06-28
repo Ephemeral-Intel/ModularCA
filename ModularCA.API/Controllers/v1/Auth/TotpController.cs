@@ -390,7 +390,8 @@ public class TotpController : ControllerBase
             .ToListAsync();
         var (Token, ExpiresAt) = _jwt.GenerateToken(user, groups, sourceIp);
         var userAgentHash = ModularCA.Auth.Utils.FingerprintUtil.ComputeUserAgentHash(Request.Headers.UserAgent.ToString());
-        var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, userAgentHash);
+        var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, userAgentHash,
+            await HttpContext.RequestServices.GetRequiredService<ModularCA.Auth.Services.IDpopProofService>().GetValidatedJktAsync(HttpContext));
         // Hand the plaintext back to the client; the DB stores the hash.
         var refreshPlaintext = refreshToken.PlaintextTokenForClient ?? refreshToken.Token;
 

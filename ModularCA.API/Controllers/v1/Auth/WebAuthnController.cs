@@ -450,7 +450,8 @@ public class WebAuthnController : ControllerBase
             .ToListAsync();
         var (Token, ExpiresAt) = _jwt.GenerateToken(user, groups, sourceIp);
         var userAgentHash = ModularCA.Auth.Utils.FingerprintUtil.ComputeUserAgentHash(Request.Headers.UserAgent.ToString());
-        var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, userAgentHash);
+        var refreshToken = _jwt.GenerateRefreshToken(user.Id, sourceIp, userAgentHash,
+            await HttpContext.RequestServices.GetRequiredService<ModularCA.Auth.Services.IDpopProofService>().GetValidatedJktAsync(HttpContext));
         // Plaintext goes to the client; DB stores the hash.
         var refreshPlaintext = refreshToken.PlaintextTokenForClient ?? refreshToken.Token;
 

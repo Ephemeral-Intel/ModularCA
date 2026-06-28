@@ -39,6 +39,11 @@
 
   <!-- Build web UIs in Staging/Release configurations -->
   <Target Name="BuildWebUIs" BeforeTargets="Build" Condition="'$(Configuration)' == 'Staging' OR '$(Configuration)' == 'Release'">
+    <!-- Keep every UI's package.json "version" in sync with the canonical repo-root VERSION file
+         (the same file Directory.Build.props reads for the assemblies), so npm metadata can't drift. -->
+    <Message Text="Syncing UI package.json versions from VERSION..." Importance="high" />
+    <Exec Command="node scripts/sync-package-versions.mjs" WorkingDirectory="$(ProjectDir).." />
+
     <!-- Admin UI -->
     <Message Text="Building Admin UI..." Importance="high" />
     <Exec Command="npm install --legacy-peer-deps" WorkingDirectory="$(ProjectDir)../modularca.adminui" />

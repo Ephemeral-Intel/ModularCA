@@ -29,4 +29,34 @@ public class TenantPolicyChangeCeremonyParameters
 
     /// <summary>Proposed value for <c>CeremonyRequiredApprovals</c>, or <c>null</c> if this ceremony doesn't touch that field.</summary>
     public int? ProposedCeremonyRequiredApprovals { get; set; }
+
+    /// <summary>
+    /// Whether this ceremony changes the tenant's controlled-user approval quorum
+    /// (<see cref="Entities.TenantEntity.UserCeremonyRequiredApprovals"/>). Needed because the proposed
+    /// value can legitimately be <c>null</c> (inherit the System quorum), so a bool distinguishes
+    /// "set to inherit" from "not touched".
+    /// </summary>
+    public bool UserQuorumIncluded { get; set; }
+
+    /// <summary>Tenant user-approval quorum read at initiation (drift guard). Null = inheriting.</summary>
+    public int? CurrentUserQuorum { get; set; }
+
+    /// <summary>Proposed tenant user-approval quorum. Null = inherit the System quorum.</summary>
+    public int? ProposedUserQuorum { get; set; }
+
+    /// <summary>Per-CA controlled-user approval quorum changes carried by this ceremony.</summary>
+    public List<CaUserQuorumChange> CaUserQuorums { get; set; } = new();
+}
+
+/// <summary>A single CA's controlled-user approval quorum change inside a TenantPolicyChange ceremony.</summary>
+public class CaUserQuorumChange
+{
+    /// <summary>The certificate authority whose quorum changes.</summary>
+    public Guid CaId { get; set; }
+
+    /// <summary>The CA's quorum read at initiation (drift guard). Null = inheriting the tenant.</summary>
+    public int? CurrentQuorum { get; set; }
+
+    /// <summary>The proposed CA quorum. Null = inherit the tenant quorum.</summary>
+    public int? ProposedQuorum { get; set; }
 }

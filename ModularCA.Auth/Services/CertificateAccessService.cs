@@ -41,23 +41,34 @@ namespace ModularCA.Auth.Services
             if (oldCert == null)
                 return; // No predecessor — nothing to inherit. Caller's grant path runs separately.
 
-            // Copy permissions from old certificate to new certificate
+            // Copy permissions from old certificate to new certificate.
             var permissions = await dbContext.CertificateAccessLists
                 .Where(c => c.CertificateId == oldCert.CertificateId)
                 .ToListAsync();
+
+            // Users that already hold an ACL row on the new cert — e.g. the requestor's manage grant
+            // added by the issuance path. The (UserId, CertificateId) unique index means re-inserting
+            // any of these throws a duplicate-key DbUpdateException (the reissue 500), so skip them.
+            var alreadyGranted = (await dbContext.CertificateAccessLists
+                .Where(c => c.CertificateId == newCert.CertificateId)
+                .Select(c => c.UserId)
+                .ToListAsync()).ToHashSet();
+
             foreach (var permission in permissions)
             {
-                // Duplicate permission information
-                var newPermission = new CertificateAccessListEntity
+                // HashSet.Add returns false when the user is already present (pre-existing row, or a
+                // duplicate within this copy) — skip to honor the unique constraint.
+                if (!alreadyGranted.Add(permission.UserId))
+                    continue;
+
+                dbContext.CertificateAccessLists.Add(new CertificateAccessListEntity
                 {
                     UserId = permission.UserId,
                     CertificateId = newCert.CertificateId,
                     AccessLevel = permission.AccessLevel,
                     GrantedAt = _timeProvider.GetUtcNow().UtcDateTime,
                     GrantedByUserId = userContext
-                };
-
-                dbContext.CertificateAccessLists.Add(newPermission);
+                });
             }
             await dbContext.SaveChangesAsync();
         }

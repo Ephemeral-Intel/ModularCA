@@ -496,7 +496,19 @@ public class CsrService : ICsrService
         var results = new List<CertRequestDto>();
         foreach (var pendingRequest in pendingRequests)
         {
-            var sans = JsonSerializer.Deserialize<List<string>>(pendingRequest.SubjectAlternativeNames ?? String.Empty);
+            // SubjectAlternativeNames can be null/empty (a CSR with no SANs) or, rarely, malformed —
+            // an empty string is NOT valid JSON, so deserializing it throws and 500s the whole list.
+            // Treat null/empty/invalid as "no SANs" rather than failing the request.
+            List<string> sans;
+            if (string.IsNullOrWhiteSpace(pendingRequest.SubjectAlternativeNames))
+            {
+                sans = new List<string>();
+            }
+            else
+            {
+                try { sans = JsonSerializer.Deserialize<List<string>>(pendingRequest.SubjectAlternativeNames) ?? new List<string>(); }
+                catch (JsonException) { sans = new List<string>(); }
+            }
 
             var request = new CertRequestDto
             {

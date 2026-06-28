@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using ModularCA.API.Filters;
+using ModularCA.Auth.Authorization;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Database;
 using ModularCA.Shared.Entities;
@@ -23,7 +24,8 @@ public class AdminSecurityPolicyController(
     ModularCADbContext db,
     ISecurityPolicyService policyService,
     IAuditService audit,
-    ICurrentUserService currentUser) : ControllerBase
+    ICurrentUserService currentUser,
+    IControlledUserCeremonyService controlledUserSvc) : ControllerBase
 {
     /// <summary>Returns the current security policy row.</summary>
     [HttpGet]
@@ -104,9 +106,18 @@ public class AdminSecurityPolicyController(
         if (request.MaxSingleRequestsPerRequest is int mspr && mspr >= 1)
             policy.MaxSingleRequestsPerRequest = mspr;
 
-        // Controlled-user ceremonies (user quorum) — minimum 1 (initiator always excluded).
-        if (request.UserQuorum is int uq && uq >= 1)
+        // Controlled-user ceremonies (System user quorum) — minimum 1 (initiator always excluded).
+        // Super-only: unlike tenant/CA quorums (which a regular admin changes via a ceremony), the
+        // System quorum is system-scoped with no tenant-scoped ceremony, so only a system-super may
+        // change it. A non-super attempting an actual change is refused.
+        if (request.UserQuorum is int uq && uq >= 1 && uq != policy.UserQuorum)
+        {
+            await currentUser.EnsureLoadedAsync();
+            var isSuper = currentUser.User != null && await controlledUserSvc.IsSuperAsync(currentUser.User.Id);
+            if (!isSuper)
+                return StatusCode(403, new { error = "Only a system super-administrator can change the System controlled-user approval quorum." });
             policy.UserQuorum = uq;
+        }
 
         // Keystore scrypt cost — clamp at write time so the DB never holds an unreasonable value.
         if (request.KeystoreScryptN is int ksn)

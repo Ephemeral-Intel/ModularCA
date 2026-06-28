@@ -42,6 +42,24 @@ namespace ModularCA.Shared.Models.Revocation
         public DateTime? InvalidityDate { get; set; }
     }
 
+    /// <summary>
+    /// Bulk revocation of several leaf certificates by serial with one shared reason, authorized by a
+    /// single step-up token. CA certificates are skipped server-side (they use the RevokeCa op and may
+    /// be ceremony-gated) and must be revoked individually.
+    /// </summary>
+    public class BulkRevokeRequest
+    {
+        [Required]
+        public List<string> SerialNumbers { get; set; } = new();
+
+        [Required]
+        [EnumDataType(typeof(RevocationReason))]
+        public RevocationReason Reason { get; set; } = RevocationReason.Unspecified;
+
+        /// <summary>Optional RFC 5280 §5.3.2 invalidity date applied to every certificate in the batch.</summary>
+        public DateTime? InvalidityDate { get; set; }
+    }
+
     public class HoldCertificateRequestByCertId
     {
         public Guid CertificateId { get; set; }

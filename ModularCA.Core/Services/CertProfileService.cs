@@ -55,7 +55,7 @@ namespace ModularCA.Core.Services
                 Name = request.Name,
                 Description = request.Description,
                 IsCaProfile = request.IsCaProfile,
-                KeyUsages = NormalizeJsonStringArray(request.KeyUsages),
+                KeyUsages = EnforceCaKeyUsages(NormalizeJsonStringArray(request.KeyUsages), request.IsCaProfile),
                 ExtendedKeyUsages = NormalizeJsonStringArray(request.ExtendedKeyUsages),
                 ValidityPeriodMin = request.ValidityPeriodMin,
                 ValidityPeriodMax = request.ValidityPeriodMax,
@@ -85,7 +85,7 @@ namespace ModularCA.Core.Services
             profile.Name = request.Name;
             profile.Description = request.Description;
             profile.IsCaProfile = request.IsCaProfile;
-            profile.KeyUsages = NormalizeJsonStringArray(request.KeyUsages);
+            profile.KeyUsages = EnforceCaKeyUsages(NormalizeJsonStringArray(request.KeyUsages), request.IsCaProfile);
             profile.ExtendedKeyUsages = NormalizeJsonStringArray(request.ExtendedKeyUsages);
             profile.ValidityPeriodMin = request.ValidityPeriodMin;
             profile.ValidityPeriodMax = request.ValidityPeriodMax;
@@ -145,6 +145,32 @@ namespace ModularCA.Core.Services
                 return json.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .ToList();
             }
+        }
+
+        /// <summary>
+        /// Save-time guard for CA certificate profiles: keyCertSign and cRLSign are MANDATORY on any
+        /// cA=TRUE certificate (RFC 5280 §4.2.1.3), so a CA profile must always carry the matching
+        /// "Key Certificate Signing" / "CRL Signing" key usages. Rather than reject the save (which
+        /// would just push the burden onto the caller), we normalise the missing bits in so the stored
+        /// profile is correct on its own and the certificate builder never has to fall back on its
+        /// force-add safety net. No-op for non-CA profiles and for CA profiles that already list them.
+        /// KeyUsages are stored as a JSON array of friendly names (e.g. "Key Certificate Signing").
+        /// </summary>
+        private static string EnforceCaKeyUsages(string keyUsagesJson, bool isCaProfile)
+        {
+            if (!isCaProfile)
+                return keyUsagesJson;
+
+            var list = TryDeserializeStringList(keyUsagesJson);
+            bool Has(string name) => list.Any(u => string.Equals(u, name, StringComparison.OrdinalIgnoreCase));
+
+            // Exact friendly-name strings as seeded in OIDOptions and understood by KeyUsageFriendlyNames.
+            if (!Has("Key Certificate Signing"))
+                list.Add("Key Certificate Signing");
+            if (!Has("CRL Signing"))
+                list.Add("CRL Signing");
+
+            return JsonSerializer.Serialize(list);
         }
 
         /// <summary>

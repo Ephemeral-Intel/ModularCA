@@ -151,6 +151,70 @@ public class AdminAuditController : ControllerBase
     }
 
     /// <summary>
+    /// Shared by-id lookup for the protocol/network audit tables. Mirrors the CA-label access
+    /// scoping used by the list endpoints: system-level auditors see everything; CA-scoped auditors
+    /// only see entries whose <c>CaLabel</c> is in their accessible set, and never null-label
+    /// (system-wide) rows. Mismatches return 404 so audit ids can't be used as an existence oracle.
+    /// </summary>
+    private async Task<IActionResult> GetProtocolAuditByIdAsync<T>(
+        DbSet<T>? set, Guid id, Func<T, string?> caLabel) where T : class
+    {
+        if (_auditDb == null || set == null)
+            return StatusCode(503, new { error = "Audit database is not configured" });
+
+        var entry = await set.FindAsync(id);
+        if (entry == null)
+            return NotFound();
+
+        var userId = _currentUser.UserId;
+        if (userId.HasValue)
+        {
+            var isSystemLevel = await _authService.HasSystemCapabilityAsync(userId.Value, Capabilities.AuditView);
+            if (!isSystemLevel)
+            {
+                var label = caLabel(entry);
+                if (label == null)
+                    return NotFound();
+
+                var accessibleCaIds = await _authService.GetAccessibleCaIdsAsync(userId.Value, Capabilities.AuditView);
+                var accessibleLabels = await _mainDb.CertificateAuthorities
+                    .Where(ca => accessibleCaIds.Contains(ca.Id))
+                    .Select(ca => ca.Label)
+                    .ToListAsync();
+                if (!accessibleLabels.Contains(label))
+                    return NotFound();
+            }
+        }
+
+        return Ok(entry);
+    }
+
+    /// <summary>Returns a single EST audit entry by ID, CA-scope filtered like the list endpoint.</summary>
+    [HttpGet("est/{id:guid}")]
+    public Task<IActionResult> GetEstAuditById(Guid id) =>
+        GetProtocolAuditByIdAsync(_auditDb?.AuditEst, id, a => a.CaLabel);
+
+    /// <summary>Returns a single SCEP audit entry by ID, CA-scope filtered like the list endpoint.</summary>
+    [HttpGet("scep/{id:guid}")]
+    public Task<IActionResult> GetScepAuditById(Guid id) =>
+        GetProtocolAuditByIdAsync(_auditDb?.AuditScep, id, a => a.CaLabel);
+
+    /// <summary>Returns a single CMP audit entry by ID, CA-scope filtered like the list endpoint.</summary>
+    [HttpGet("cmp/{id:guid}")]
+    public Task<IActionResult> GetCmpAuditById(Guid id) =>
+        GetProtocolAuditByIdAsync(_auditDb?.AuditCmp, id, a => a.CaLabel);
+
+    /// <summary>Returns a single ACME audit entry by ID, CA-scope filtered like the list endpoint.</summary>
+    [HttpGet("acme/{id:guid}")]
+    public Task<IActionResult> GetAcmeAuditById(Guid id) =>
+        GetProtocolAuditByIdAsync(_auditDb?.AuditAcme, id, a => a.CaLabel);
+
+    /// <summary>Returns a single network audit entry by ID, CA-scope filtered like the list endpoint.</summary>
+    [HttpGet("network/{id:guid}")]
+    public Task<IActionResult> GetNetworkAuditById(Guid id) =>
+        GetProtocolAuditByIdAsync(_auditDb?.AuditNetwork, id, a => a.CaLabel);
+
+    /// <summary>
     /// Returns paginated EST audit entries, optionally filtered by date range and CA.
     /// Non-system users only see logs for CAs they have auditor-level access to.
     /// </summary>

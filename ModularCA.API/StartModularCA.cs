@@ -960,6 +960,8 @@ else
 }
 
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
+// DPoP proof-of-possession validation for refresh-token binding (theft defense without IP pinning).
+builder.Services.AddScoped<ModularCA.Auth.Services.IDpopProofService, ModularCA.Auth.Services.DpopProofService>();
 builder.Services.AddScoped<IPasswordPolicyService, PasswordPolicyService>();
 
 // Configure dependency injection — skip keystore loading in setup mode (files don't exist yet)
@@ -1203,7 +1205,8 @@ builder.Services.AddCors(options =>
                       "X-Requested-With",
                       "X-MFA-Token",
                       "X-CSRF-Token",
-                      "X-Correlation-Id");
+                      "X-Correlation-Id",
+                      "DPoP");
     });
 });
 

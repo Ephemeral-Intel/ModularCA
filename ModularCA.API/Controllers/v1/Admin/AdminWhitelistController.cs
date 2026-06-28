@@ -295,6 +295,106 @@ public class AdminWhitelistController(
     }
 
     /// <summary>
+    /// Bulk-deletes whitelist rules under a <b>single</b> step-up MFA authorization. The token is
+    /// validated once for the <c>delete-whitelist</c> operation with no specific target, so the
+    /// admin UI prompts for MFA only once for the whole batch (per-row deletes would each require
+    /// their own target-scoped token). System-default rules in the list are skipped, not deleted.
+    /// </summary>
+    /// <param name="request">The list of whitelist ids to delete.</param>
+    /// <param name="mfaToken">Step-up MFA token from the <c>X-MFA-Token</c> header.</param>
+    /// <param name="ct">Cancellation token propagated from the HTTP request.</param>
+    /// <returns>200 OK with a per-outcome summary, 400 on empty list, 403 when step-up is required.</returns>
+    [HttpPost("bulk-delete")]
+    public async Task<IActionResult> BulkDelete(
+        [FromBody] BulkDeleteWhitelistRequest request,
+        [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null,
+        CancellationToken ct = default)
+    {
+        await _currentUser.EnsureLoadedAsync();
+        if (_currentUser.User == null) return Unauthorized();
+
+        // One token covers the batch — validated for the operation with a null target.
+        if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.DeleteWhitelist, null))
+            return StatusCode(403, new { error = "MFA re-verification required. Call /auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+        if (request?.Ids == null || request.Ids.Count == 0)
+            return BadRequest(new { error = "At least one id is required." });
+
+        int deleted = 0, skipped = 0, notFound = 0;
+        foreach (var id in request.Ids.Distinct())
+        {
+            var existing = await _whitelistService.GetByIdAsync(id, ct);
+            if (existing == null) { notFound++; continue; }
+            if (existing.IsSystemDefault) { skipped++; continue; } // system defaults can't be deleted
+
+            if (!await _whitelistService.DeleteAsync(id, ct)) { skipped++; continue; }
+            deleted++;
+
+            await _audit.LogAsync(
+                AuditActionType.WhitelistDeleted,
+                _currentUser.User?.Id,
+                _currentUser.User?.Username,
+                targetEntityType: "Whitelist",
+                targetEntityId: id.ToString(),
+                details: new { existing.Scope, existing.Name, CidrCount = existing.CidrList.Count },
+                sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString());
+        }
+
+        return Ok(new { deleted, skipped, notFound });
+    }
+
+    /// <summary>
+    /// Bulk enable/disable of whitelist rules under a <b>single</b> step-up MFA authorization. The
+    /// token is validated once for the <c>update-whitelist</c> operation with no specific target, so
+    /// the admin UI prompts only once for the whole batch. Rules already in the requested state are
+    /// left untouched (counted as no-ops, not re-written).
+    /// </summary>
+    /// <param name="request">The ids to update and the target enabled flag.</param>
+    /// <param name="mfaToken">Step-up MFA token from the <c>X-MFA-Token</c> header.</param>
+    /// <param name="ct">Cancellation token propagated from the HTTP request.</param>
+    /// <returns>200 OK with a per-outcome summary, 400 on empty list, 403 when step-up is required.</returns>
+    [HttpPost("bulk-set-enabled")]
+    public async Task<IActionResult> BulkSetEnabled(
+        [FromBody] BulkSetEnabledWhitelistRequest request,
+        [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null,
+        CancellationToken ct = default)
+    {
+        await _currentUser.EnsureLoadedAsync();
+        if (_currentUser.User == null) return Unauthorized();
+
+        // One token covers the batch — validated for the operation with a null target.
+        if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.UpdateWhitelist, null))
+            return StatusCode(403, new { error = "MFA re-verification required. Call /auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+        if (request?.Ids == null || request.Ids.Count == 0)
+            return BadRequest(new { error = "At least one id is required." });
+
+        int updated = 0, unchanged = 0, notFound = 0;
+        foreach (var id in request.Ids.Distinct())
+        {
+            var existing = await _whitelistService.GetByIdAsync(id, ct);
+            if (existing == null) { notFound++; continue; }
+            if (existing.IsEnabled == request.Enabled) { unchanged++; continue; }
+
+            existing.IsEnabled = request.Enabled;
+            existing.UpdatedAt = DateTime.UtcNow;
+            if (await _whitelistService.UpdateAsync(id, existing, ct) == null) { notFound++; continue; }
+            updated++;
+
+            await _audit.LogAsync(
+                AuditActionType.WhitelistUpdated,
+                _currentUser.User?.Id,
+                _currentUser.User?.Username,
+                targetEntityType: "Whitelist",
+                targetEntityId: id.ToString(),
+                details: new { existing.Scope, existing.Name, existing.IsEnabled },
+                sourceIp: HttpContext.Connection.RemoteIpAddress?.ToString());
+        }
+
+        return Ok(new { updated, unchanged, notFound });
+    }
+
+    /// <summary>
     /// Maps a persistent <see cref="WhitelistEntity"/> onto the flat
     /// <see cref="WhitelistResponse"/> DTO returned to the admin UI. The JSON
     /// <c>Cidrs</c> column is decoded via <see cref="WhitelistEntity.CidrList"/>
@@ -484,4 +584,27 @@ public class UpdateWhitelistRequest
 
     /// <summary>New enabled flag, or null to leave unchanged.</summary>
     public bool? IsEnabled { get; set; }
+}
+
+/// <summary>
+/// Request body for <c>POST /api/v1/admin/whitelists/bulk-delete</c>. Carries the ids to delete
+/// under one step-up authorization. System-default ids are skipped server-side.
+/// </summary>
+public class BulkDeleteWhitelistRequest
+{
+    /// <summary>The whitelist rule ids to delete.</summary>
+    public List<Guid> Ids { get; set; } = new();
+}
+
+/// <summary>
+/// Request body for <c>POST /api/v1/admin/whitelists/bulk-set-enabled</c>. Carries the ids to
+/// toggle and the target enabled state, applied under one step-up authorization.
+/// </summary>
+public class BulkSetEnabledWhitelistRequest
+{
+    /// <summary>The whitelist rule ids to update.</summary>
+    public List<Guid> Ids { get; set; } = new();
+
+    /// <summary>Target enabled state to apply to every listed rule.</summary>
+    public bool Enabled { get; set; }
 }

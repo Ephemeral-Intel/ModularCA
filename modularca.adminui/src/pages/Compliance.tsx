@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import Chevron from '../components/Chevron';
 import { apiGet, apiPost, apiBlob } from '../api/client';
 import { useToast } from '../context/ToastContext';
 
@@ -502,7 +503,7 @@ const Compliance: React.FC = () => {
                                                 onClick={() => setExpandedId(isExpanded ? null : v.id)}
                                             >
                                                 <td className="py-2 px-3 text-gray-600">
-                                                    {isExpanded ? '▼' : '▶'}
+                                                    <Chevron open={isExpanded} className="w-3 h-3" />
                                                 </td>
                                                 <td className="py-2 px-3">
                                                     <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${severityColor(v.severity)}`}>

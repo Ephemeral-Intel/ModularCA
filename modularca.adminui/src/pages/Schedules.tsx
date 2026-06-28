@@ -1,16 +1,17 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
+import DetailField from '../components/cards/DetailField';
 import ConfirmModal from '../components/ConfirmModal';
+import { DataTable, DataTableColumn, DataTableBulkAction } from '../components/DataTable';
 import {
     type CrlScheduleEntry,
     type LdapPublisherEntry,
     type SchedulerConfigUpdate,
     type SchedulerHealth,
     type SchedulerJob,
-    type SchedulerJobUpdate,
     type SchedulerSchedules,
     getSchedulerHealth,
     getSchedulerJobs,
@@ -20,7 +21,6 @@ import {
     runSchedulerJob,
     setSchedulerJobEnabled,
     updateSchedulerConfig,
-    updateSchedulerJob,
 } from '../api/scheduler';
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,6 @@ import {
 const cardClass = 'bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg';
 const inputClass = 'w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white focus:outline-none focus:border-blue-500';
 const labelClass = 'block text-xs text-gray-600 dark:text-gray-400 mb-1';
-const smallButton = 'px-3 py-1 text-xs rounded border transition-colors';
 const primaryButton = 'px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors disabled:opacity-50';
 
 // ---------------------------------------------------------------------------
@@ -74,15 +73,6 @@ const TimeCell: React.FC<{ iso: string | null | undefined; now: number }> = ({ i
 );
 
 // ---------------------------------------------------------------------------
-// Cron validation (basic — server is authoritative via NCrontab)
-// ---------------------------------------------------------------------------
-
-const CRON_5_FIELD = /^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s*$/;
-function isCronShapeValid(expr: string): boolean {
-    return CRON_5_FIELD.test(expr);
-}
-
-// ---------------------------------------------------------------------------
 // Health Strip
 // ---------------------------------------------------------------------------
 
@@ -121,116 +111,12 @@ const HealthStrip: React.FC<{ health: SchedulerHealth | null; now: number }> = (
 };
 
 // ---------------------------------------------------------------------------
-// Job Edit Modal
-// ---------------------------------------------------------------------------
-
-interface JobEditModalProps {
-    job: SchedulerJob | null;
-    onClose: () => void;
-    onSaved: () => void;
-}
-
-const JobEditModal: React.FC<JobEditModalProps> = ({ job, onClose, onSaved }) => {
-    const { requireStepUp } = useStepUp();
-    const { showToast } = useToast();
-    const [cron, setCron] = useState('');
-    const [timeout, setTimeoutVal] = useState('');
-    const [saving, setSaving] = useState(false);
-    const [serverError, setServerError] = useState<string | null>(null);
-
-    useEffect(() => {
-        if (job) {
-            setCron(job.cronExpression || '');
-            setTimeoutVal(String(job.timeoutSeconds ?? ''));
-            setServerError(null);
-        }
-    }, [job]);
-
-    if (!job) return null;
-
-    const cronShapeOk = isCronShapeValid(cron);
-    const timeoutNum = parseInt(timeout, 10);
-    const timeoutOk = !timeout || (Number.isFinite(timeoutNum) && timeoutNum > 0);
-    const canSave = cronShapeOk && timeoutOk && !saving;
-
-    const handleSave = async () => {
-        if (!canSave) return;
-        setSaving(true);
-        setServerError(null);
-        const body: SchedulerJobUpdate = {};
-        if (cron && cron !== job.cronExpression) body.cronExpression = cron;
-        if (timeout && timeoutNum !== job.timeoutSeconds) body.timeoutSeconds = timeoutNum;
-        try {
-            await updateSchedulerJob(job.name, body, requireStepUp);
-            showToast('success', `Updated ${job.name}`);
-            onSaved();
-            onClose();
-        } catch (err: any) {
-            if (err?.message === 'Step-up MFA cancelled') return;
-            setServerError(err?.message || 'Failed to update job');
-        } finally {
-            setSaving(false);
-        }
-    };
-
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-2xl p-6 w-full max-w-md mx-4 space-y-4">
-                <h3 className="text-lg font-bold text-gray-900 dark:text-white">Edit Job: {job.name}</h3>
-                <div>
-                    <label className={labelClass}>Cron Expression</label>
-                    <input
-                        type="text"
-                        value={cron}
-                        onChange={(e) => setCron(e.target.value)}
-                        placeholder="e.g. 0 */6 * * *"
-                        className={`${inputClass} font-mono`}
-                    />
-                    {!cronShapeOk && cron.length > 0 && (
-                        <p className="text-[10px] text-red-700 dark:text-red-400 mt-1">
-                            Must be 5 space-separated fields (minute, hour, day, month, day-of-week).
-                        </p>
-                    )}
-                </div>
-                <div>
-                    <label className={labelClass}>Timeout (seconds)</label>
-                    <input
-                        type="text"
-                        inputMode="numeric"
-                        value={timeout}
-                        onChange={(e) => setTimeoutVal(e.target.value.replace(/\D/g, ''))}
-                        className={inputClass}
-                    />
-                    {!timeoutOk && (
-                        <p className="text-[10px] text-red-700 dark:text-red-400 mt-1">Timeout must be a positive integer.</p>
-                    )}
-                </div>
-                {serverError && (
-                    <div className="p-2 bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded text-xs text-red-800 dark:text-red-300">
-                        {serverError}
-                    </div>
-                )}
-                <div className="flex justify-end gap-3">
-                    <button onClick={onClose} disabled={saving}
-                        className="px-4 py-2 text-sm bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
-                        Cancel
-                    </button>
-                    <button onClick={handleSave} disabled={!canSave} className={primaryButton}>
-                        {saving ? 'Saving...' : 'Save'}
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// ---------------------------------------------------------------------------
 // System Jobs Section
 // ---------------------------------------------------------------------------
 
 // Continuous-throttle jobs (always-on, internally rate-limited). The backend
-// returns 400 if the operator tries to disable these — surface the disabled
-// toggle button proactively instead of letting the round-trip fail.
+// returns 400 if the operator tries to disable these — guard the Enable/Disable
+// toolbar actions proactively instead of letting the round-trip fail.
 const NON_TOGGLEABLE_JOBS = new Set<string>(['AcmeCleanup', 'TlsRenewal']);
 
 function jobResultBadge(result: SchedulerJob['lastResult']): React.ReactElement {
@@ -240,20 +126,39 @@ function jobResultBadge(result: SchedulerJob['lastResult']): React.ReactElement 
     return <StatusBadge status="disabled" label="never run" />;
 }
 
+/* ── read-only drawer for a system job ──────────────────────────────────────── */
+const JobDrawer: React.FC<{ job: SchedulerJob; now: number }> = ({ job, now }) => (
+    <div className="text-sm">
+        <DetailField label="Name" value={job.name} />
+        <DetailField label="Status" value={job.enabled ? 'Enabled' : 'Disabled'} />
+        <DetailField label="Cron" value={job.cronExpression} mono />
+        <DetailField label="Timeout" value={`${job.timeoutSeconds}s`} />
+        <DetailField label="Last Run" value={`${formatRelative(job.lastRunUtc, now)} (${job.lastResult ?? 'never run'})`} />
+        {job.lastDurationMs != null && <DetailField label="Last Duration" value={`${job.lastDurationMs} ms`} />}
+        <DetailField label="Next Run" value={formatRelative(job.nextRunUtc, now)} />
+        <DetailField label="Consecutive Failures" value={String(job.consecutiveFailureCount)} />
+        {job.lastError && (
+            <div className="mt-2">
+                <span className="text-gray-600 text-xs">Last Error</span>
+                <pre className="mt-1 text-[11px] text-red-700 dark:text-red-400 whitespace-pre-wrap break-words">{job.lastError}</pre>
+            </div>
+        )}
+    </div>
+);
+
 interface SystemJobsSectionProps {
     jobs: SchedulerJob[];
     health: SchedulerHealth | null;
+    loading: boolean;
     now: number;
     onChanged: () => void;
 }
 
-const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, now, onChanged }) => {
+const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, loading, now, onChanged }) => {
     const { requireStepUp } = useStepUp();
     const { showToast } = useToast();
-    const [editingJob, setEditingJob] = useState<SchedulerJob | null>(null);
     const [confirmRunJob, setConfirmRunJob] = useState<SchedulerJob | null>(null);
     const [running, setRunning] = useState<string | null>(null);
-    const [togglingFlag, setTogglingFlag] = useState<string | null>(null);
 
     const alertThreshold = health?.consecutiveFailureAlertThreshold ?? Number.MAX_SAFE_INTEGER;
 
@@ -277,7 +182,6 @@ const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, now
             showToast('error', `${job.name} is a continuous job and cannot be disabled.`);
             return;
         }
-        setTogglingFlag(job.name);
         try {
             // Toggles the SystemConfig boolean that gates this job (e.g.
             // Backup.CreateOnSchedule, AutoRenewal.Enabled). Step-up MFA gated
@@ -288,99 +192,65 @@ const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, now
         } catch (err: any) {
             if (err?.message === 'Step-up MFA cancelled') return;
             showToast('error', err?.message || 'Failed to toggle job');
-        } finally {
-            setTogglingFlag(null);
         }
     };
+
+    const columns: DataTableColumn<SchedulerJob>[] = [
+        { key: 'name', header: 'Name', defaultWidth: 180, minWidth: 140, truncate: false, exportValue: (j) => j.name, render: (j) => <span className="text-gray-900 dark:text-white truncate">{j.name}</span> },
+        { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (j) => (j.enabled ? 'enabled' : 'disabled'), render: (j) => <StatusBadge status={j.enabled ? 'enabled' : 'disabled'} /> },
+        { key: 'cron', header: 'Cron', defaultWidth: 130, exportValue: (j) => j.cronExpression, render: (j) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{j.cronExpression}</span> },
+        { key: 'lastRun', header: 'Last Run', defaultWidth: 140, exportValue: (j) => formatAbsoluteUtc(j.lastRunUtc), render: (j) => <TimeCell iso={j.lastRunUtc} now={now} /> },
+        {
+            key: 'lastResult', header: 'Last Run Result', defaultWidth: 160, minWidth: 120, flex: true, truncate: false, exportValue: (j) => j.lastResult ?? 'never run',
+            render: (j) => (
+                <div className="min-w-0">
+                    {jobResultBadge(j.lastResult)}
+                    {j.lastError && <div className="text-[10px] text-red-700 dark:text-red-400 truncate mt-0.5" title={j.lastError}>{j.lastError}</div>}
+                </div>
+            ),
+        },
+        { key: 'nextRun', header: 'Next Run', defaultWidth: 140, exportValue: (j) => formatAbsoluteUtc(j.nextRunUtc), render: (j) => <TimeCell iso={j.nextRunUtc} now={now} /> },
+        {
+            key: 'failures', header: 'Failures', defaultWidth: 90, exportValue: (j) => j.consecutiveFailureCount,
+            render: (j) => {
+                const over = j.consecutiveFailureCount >= alertThreshold;
+                return (
+                    <span className={`inline-block px-2 py-0.5 text-xs rounded border ${over
+                        ? 'bg-red-50 text-red-800 border-red-300 dark:bg-red-900/50 dark:text-red-300 dark:border-red-700'
+                        : 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-700/50 dark:text-gray-300 dark:border-gray-600'}`}>
+                        {j.consecutiveFailureCount}
+                    </span>
+                );
+            },
+        },
+        { key: 'timeout', header: 'Timeout', defaultWidth: 90, exportValue: (j) => j.timeoutSeconds, render: (j) => <span className="text-xs text-gray-700 dark:text-gray-300">{j.timeoutSeconds}s</span> },
+    ];
+
+    // Every scheduler mutation is step-up MFA gated and there's no bulk endpoint, so the
+    // mutating actions are single-select (one row → one prompt) rather than looping.
+    const bulkActions: DataTableBulkAction<SchedulerJob>[] = [
+        { label: 'Run Now', single: true, variant: 'primary', onClick: (rows) => setConfirmRunJob(rows[0]) },
+        { label: 'Enable', single: true, enabledFor: (j) => !NON_TOGGLEABLE_JOBS.has(j.name) && !j.enabled, onClick: (rows) => handleToggleFlag(rows[0]) },
+        { label: 'Disable', single: true, enabledFor: (j) => !NON_TOGGLEABLE_JOBS.has(j.name) && j.enabled, onClick: (rows) => handleToggleFlag(rows[0]) },
+    ];
 
     return (
         <section className="space-y-3">
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white">System Jobs</h2>
-            <div className={`${cardClass} overflow-x-auto`}>
-                <table className="w-full text-sm">
-                    <thead className="bg-gray-200/50 dark:bg-gray-700/50 text-left">
-                        <tr>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300">Name</th>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300">Cron</th>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300">Last Run</th>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300">Next Run</th>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300">Failures</th>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300">Timeout</th>
-                            <th className="px-3 py-2 text-xs font-semibold text-gray-700 dark:text-gray-300 text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {jobs.length === 0 && (
-                            <tr><td colSpan={7} className="px-3 py-6 text-center text-xs text-gray-600 dark:text-gray-400">No system jobs registered.</td></tr>
-                        )}
-                        {jobs.map((job) => {
-                            const canToggle = !NON_TOGGLEABLE_JOBS.has(job.name);
-                            const failuresOver = job.consecutiveFailureCount >= alertThreshold;
-                            return (
-                                <tr key={job.name} className="border-t border-gray-300 dark:border-gray-700">
-                                    <td className="px-3 py-2 text-gray-900 dark:text-white">
-                                        <div className="flex items-center gap-2">
-                                            <span>{job.name}</span>
-                                            <StatusBadge status={job.enabled ? 'enabled' : 'disabled'} />
-                                        </div>
-                                    </td>
-                                    <td className="px-3 py-2 font-mono text-xs text-gray-700 dark:text-gray-300">{job.cronExpression}</td>
-                                    <td className="px-3 py-2">
-                                        <div className="flex items-center gap-2">
-                                            <TimeCell iso={job.lastRunUtc} now={now} />
-                                            {jobResultBadge(job.lastResult)}
-                                        </div>
-                                        {job.lastError && (
-                                            <div className="text-[10px] text-red-700 dark:text-red-400 mt-0.5 max-w-xs truncate" title={job.lastError}>
-                                                {job.lastError}
-                                            </div>
-                                        )}
-                                    </td>
-                                    <td className="px-3 py-2"><TimeCell iso={job.nextRunUtc} now={now} /></td>
-                                    <td className="px-3 py-2">
-                                        <span className={`inline-block px-2 py-0.5 text-xs rounded border ${failuresOver
-                                            ? 'bg-red-50 text-red-800 border-red-300 dark:bg-red-900/50 dark:text-red-300 dark:border-red-700'
-                                            : 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-700/50 dark:text-gray-300 dark:border-gray-600'}`}>
-                                            {job.consecutiveFailureCount}
-                                        </span>
-                                    </td>
-                                    <td className="px-3 py-2 text-xs text-gray-700 dark:text-gray-300">{job.timeoutSeconds}s</td>
-                                    <td className="px-3 py-2 text-right">
-                                        <div className="inline-flex gap-1.5">
-                                            <button
-                                                onClick={() => setEditingJob(job)}
-                                                className={`${smallButton} bg-blue-50 dark:bg-blue-900/50 text-blue-800 dark:text-blue-300 border-blue-300 dark:border-blue-700 hover:bg-blue-100 dark:hover:bg-blue-900`}>
-                                                Edit
-                                            </button>
-                                            <button
-                                                onClick={() => setConfirmRunJob(job)}
-                                                disabled={running === job.name}
-                                                className={`${smallButton} bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-300 border-green-300 dark:border-green-700 hover:bg-green-100 dark:hover:bg-green-900 disabled:opacity-50`}>
-                                                {running === job.name ? 'Running...' : 'Run Now'}
-                                            </button>
-                                            {canToggle && (
-                                                <button
-                                                    onClick={() => handleToggleFlag(job)}
-                                                    disabled={togglingFlag === job.name}
-                                                    className={`${smallButton} ${job.enabled
-                                                        ? 'bg-yellow-50 dark:bg-yellow-900/50 text-yellow-800 dark:text-yellow-300 border-yellow-300 dark:border-yellow-700 hover:bg-yellow-100 dark:hover:bg-yellow-900'
-                                                        : 'bg-gray-100 text-gray-700 border-gray-300 dark:bg-gray-700/50 dark:text-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600'} disabled:opacity-50`}>
-                                                    {job.enabled ? 'Disable' : 'Enable'}
-                                                </button>
-                                            )}
-                                        </div>
-                                    </td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                </table>
-            </div>
-
-            <JobEditModal
-                job={editingJob}
-                onClose={() => setEditingJob(null)}
-                onSaved={onChanged}
+            <DataTable<SchedulerJob>
+                tableId="scheduler-jobs"
+                title="System Jobs"
+                rows={jobs}
+                rowKey={(j) => j.name}
+                loading={loading}
+                empty="No system jobs registered."
+                columns={columns}
+                selectable
+                bulkActions={bulkActions}
+                exportFileName="scheduler-jobs"
+                renderDrawer={(j) => <JobDrawer job={j} now={now} />}
+                drawerTitle={(j) => j.name}
+                detailPath={(j) => `/schedules/jobs/${encodeURIComponent(j.name)}`}
             />
 
             <ConfirmModal
@@ -398,34 +268,61 @@ const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, now
 };
 
 // ---------------------------------------------------------------------------
-// Schedules Section (CRL + LDAP, grouped by CA)
+// Schedules Section (CRL + LDAP, one flat table each with a CA column)
 // ---------------------------------------------------------------------------
+
+function ldapFlags(l: LdapPublisherEntry): string {
+    return [
+        l.publishCACert ? 'CA' : null,
+        l.publishCRL ? 'CRL' : null,
+        l.publishDelta ? 'Δ' : null,
+        l.publishUserCerts ? 'Users' : null,
+    ].filter(Boolean).join(', ');
+}
+
+const CrlDrawer: React.FC<{ entry: CrlScheduleEntry; now: number }> = ({ entry, now }) => (
+    <div className="text-sm">
+        <DetailField label="CA" value={entry.caLabel || 'Unknown CA'} />
+        <DetailField label="Name" value={entry.name} />
+        <DetailField label="Status" value={entry.enabled ? 'Enabled' : 'Disabled'} />
+        <DetailField label="Update Interval" value={entry.updateInterval} mono />
+        <DetailField label="Delta Interval" value={entry.deltaInterval || ''} mono />
+        <DetailField label="Is Delta" value={entry.isDelta ? 'Yes' : 'No'} />
+        <DetailField label="Last Generated" value={formatRelative(entry.lastGenerated || entry.lastUpdatedUtc, now)} />
+        <DetailField label="Next Update" value={formatRelative(entry.nextUpdateUtc, now)} />
+        {entry.lastCrlNumber != null && <DetailField label="Last CRL Number" value={String(entry.lastCrlNumber)} />}
+        <p className="text-[11px] text-gray-500 pt-3">Edit CRL schedules on the Distribution page.</p>
+    </div>
+);
+
+const LdapDrawer: React.FC<{ entry: LdapPublisherEntry; now: number }> = ({ entry, now }) => (
+    <div className="text-sm">
+        <DetailField label="CA" value={entry.caLabel || 'Unknown CA'} />
+        <DetailField label="Host" value={`${entry.host}:${entry.port}`} mono />
+        <DetailField label="Base DN" value={entry.baseDn} mono />
+        <DetailField label="Status" value={entry.enabled ? 'Enabled' : 'Disabled'} />
+        <DetailField label="Update Interval" value={entry.updateInterval} mono />
+        <DetailField label="Publishes" value={ldapFlags(entry) || 'None'} />
+        <DetailField label="Last Updated" value={formatRelative(entry.lastUpdatedUtc, now)} />
+        <DetailField label="Next Update" value={formatRelative(entry.nextUpdateUtc, now)} />
+        <p className="text-[11px] text-gray-500 pt-3">Edit LDAP publishers on the Distribution page.</p>
+    </div>
+);
 
 interface SchedulesSectionProps {
     schedules: SchedulerSchedules | null;
+    loading: boolean;
     now: number;
     onChanged: () => void;
 }
 
-const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onChanged }) => {
+const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, loading, now, onChanged }) => {
     const { requireStepUp } = useStepUp();
     const { showToast } = useToast();
-    const [collapsedCas, setCollapsedCas] = useState<Record<string, boolean>>({});
+    const navigate = useNavigate();
 
-    const grouped = useMemo(() => {
-        const map = new Map<string, { caLabel: string; crl: CrlScheduleEntry[]; ldap: LdapPublisherEntry[] }>();
-        const ensure = (key: string, label: string) => {
-            if (!map.has(key)) map.set(key, { caLabel: label, crl: [], ldap: [] });
-            return map.get(key)!;
-        };
-        if (schedules) {
-            for (const c of schedules.crl) ensure(c.caCertificateId || c.caLabel, c.caLabel || 'Unknown CA').crl.push(c);
-            for (const l of schedules.ldap) ensure(l.certificateAuthorityId || l.caLabel, l.caLabel || 'Unknown CA').ldap.push(l);
-        }
-        return Array.from(map.entries()).sort((a, b) => a[1].caLabel.localeCompare(b[1].caLabel));
-    }, [schedules]);
-
-    const toggleCa = (key: string) => setCollapsedCas((p) => ({ ...p, [key]: !p[key] }));
+    const crl = schedules?.crl ?? [];
+    const ldap = schedules?.ldap ?? [];
 
     const handleRunCrl = async (entry: CrlScheduleEntry) => {
         try {
@@ -449,128 +346,68 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, now, onC
         }
     };
 
+    const crlColumns: DataTableColumn<CrlScheduleEntry>[] = [
+        { key: 'ca', header: 'CA', defaultWidth: 160, minWidth: 120, truncate: false, exportValue: (c) => c.caLabel, render: (c) => <span className="text-gray-900 dark:text-white truncate">{c.caLabel || 'Unknown CA'}</span> },
+        { key: 'name', header: 'Name', defaultWidth: 180, flex: true, exportValue: (c) => c.name, render: (c) => <span className="text-gray-900 dark:text-white truncate">{c.name}</span> },
+        { key: 'update', header: 'Update', defaultWidth: 110, exportValue: (c) => c.updateInterval, render: (c) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{c.updateInterval}</span> },
+        { key: 'delta', header: 'Delta', defaultWidth: 100, exportValue: (c) => c.deltaInterval || '', render: (c) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{c.deltaInterval || '-'}</span> },
+        { key: 'last', header: 'Last', defaultWidth: 140, exportValue: (c) => formatAbsoluteUtc(c.lastGenerated || c.lastUpdatedUtc), render: (c) => <TimeCell iso={c.lastGenerated || c.lastUpdatedUtc} now={now} /> },
+        { key: 'next', header: 'Next', defaultWidth: 140, exportValue: (c) => formatAbsoluteUtc(c.nextUpdateUtc), render: (c) => <TimeCell iso={c.nextUpdateUtc} now={now} /> },
+        { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (c) => (c.enabled ? 'enabled' : 'disabled'), render: (c) => <StatusBadge status={c.enabled ? 'enabled' : 'disabled'} /> },
+    ];
+
+    const crlBulk: DataTableBulkAction<CrlScheduleEntry>[] = [
+        { label: 'Run Now', single: true, variant: 'primary', onClick: (rows) => handleRunCrl(rows[0]) },
+        { label: 'Edit on Distribution →', single: true, onClick: () => navigate('/distribution?tab=crl') },
+    ];
+
+    const ldapColumns: DataTableColumn<LdapPublisherEntry>[] = [
+        { key: 'ca', header: 'CA', defaultWidth: 150, minWidth: 120, truncate: false, exportValue: (l) => l.caLabel, render: (l) => <span className="text-gray-900 dark:text-white truncate">{l.caLabel || 'Unknown CA'}</span> },
+        { key: 'host', header: 'Host', defaultWidth: 170, exportValue: (l) => `${l.host}:${l.port}`, render: (l) => <span className="text-gray-900 dark:text-white truncate">{l.host}:{l.port}</span> },
+        { key: 'baseDn', header: 'Base DN', defaultWidth: 200, flex: true, exportValue: (l) => l.baseDn, render: (l) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{l.baseDn}</span> },
+        { key: 'update', header: 'Update', defaultWidth: 100, exportValue: (l) => l.updateInterval, render: (l) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{l.updateInterval}</span> },
+        { key: 'last', header: 'Last', defaultWidth: 130, exportValue: (l) => formatAbsoluteUtc(l.lastUpdatedUtc), render: (l) => <TimeCell iso={l.lastUpdatedUtc} now={now} /> },
+        { key: 'next', header: 'Next', defaultWidth: 130, exportValue: (l) => formatAbsoluteUtc(l.nextUpdateUtc), render: (l) => <TimeCell iso={l.nextUpdateUtc} now={now} /> },
+        { key: 'publishes', header: 'Publishes', defaultWidth: 120, exportValue: (l) => ldapFlags(l), render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300">{ldapFlags(l) || '-'}</span> },
+        { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (l) => (l.enabled ? 'enabled' : 'disabled'), render: (l) => <StatusBadge status={l.enabled ? 'enabled' : 'disabled'} /> },
+    ];
+
+    const ldapBulk: DataTableBulkAction<LdapPublisherEntry>[] = [
+        { label: 'Run Now', single: true, variant: 'primary', onClick: (rows) => handleRunLdap(rows[0]) },
+        { label: 'Edit on Distribution →', single: true, onClick: (rows) => navigate(`/distribution?tab=ldap${rows[0].certificateAuthorityId ? `&caId=${rows[0].certificateAuthorityId}` : ''}`) },
+    ];
+
     return (
-        <section className="space-y-3">
+        <section className="space-y-4">
             <h2 className="text-lg font-semibold text-gray-900 dark:text-white">Schedules</h2>
-            {!schedules && <div className={`${cardClass} p-4 text-sm text-gray-600 dark:text-gray-400`}>Loading schedules...</div>}
-            {schedules && grouped.length === 0 && (
-                <div className={`${cardClass} p-4 text-sm text-gray-600 dark:text-gray-400`}>No CRL or LDAP schedules configured.</div>
-            )}
-
-            {grouped.map(([key, group]) => {
-                const collapsed = !!collapsedCas[key];
-                return (
-                    <div key={key} className={cardClass}>
-                        <button onClick={() => toggleCa(key)}
-                            className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:hover:bg-gray-700/50 transition-colors">
-                            <span className="text-gray-600 text-xs">{collapsed ? '▶' : '▼'}</span>
-                            <span className="text-sm font-semibold text-gray-900 dark:text-white">{group.caLabel}</span>
-                            <span className="text-xs text-gray-600 dark:text-gray-400 ml-2">
-                                {group.crl.length} CRL &middot; {group.ldap.length} LDAP
-                            </span>
-                        </button>
-                        {!collapsed && (
-                            <div className="border-t border-gray-300 dark:border-gray-700">
-                                {/* CRL sub-table */}
-                                <div className="p-3 space-y-2">
-                                    <h3 className="text-xs font-semibold uppercase text-gray-600 dark:text-gray-400 tracking-wide">CRL Schedules</h3>
-                                    {group.crl.length === 0 && <div className="text-xs text-gray-600 dark:text-gray-400">None.</div>}
-                                    {group.crl.length > 0 && (
-                                        <div className="overflow-x-auto">
-                                            <table className="w-full text-xs">
-                                                <thead className="text-left text-gray-600 dark:text-gray-400">
-                                                    <tr>
-                                                        <th className="px-2 py-1">Name</th>
-                                                        <th className="px-2 py-1">Update</th>
-                                                        <th className="px-2 py-1">Delta</th>
-                                                        <th className="px-2 py-1">Last</th>
-                                                        <th className="px-2 py-1">Next</th>
-                                                        <th className="px-2 py-1">Status</th>
-                                                        <th className="px-2 py-1 text-right">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {group.crl.map((c) => (
-                                                        <tr key={c.taskId} className="border-t border-gray-300 dark:border-gray-700">
-                                                            <td className="px-2 py-1.5 text-gray-900 dark:text-white">{c.name}</td>
-                                                            <td className="px-2 py-1.5 font-mono">{c.updateInterval}</td>
-                                                            <td className="px-2 py-1.5 font-mono">{c.deltaInterval || '-'}</td>
-                                                            <td className="px-2 py-1.5"><TimeCell iso={c.lastGenerated || c.lastUpdatedUtc} now={now} /></td>
-                                                            <td className="px-2 py-1.5"><TimeCell iso={c.nextUpdateUtc} now={now} /></td>
-                                                            <td className="px-2 py-1.5"><StatusBadge status={c.enabled ? 'enabled' : 'disabled'} /></td>
-                                                            <td className="px-2 py-1.5 text-right">
-                                                                <div className="inline-flex gap-1 items-center">
-                                                                    <button onClick={() => handleRunCrl(c)}
-                                                                        className={`${smallButton} bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-300 border-green-300 dark:border-green-700 hover:bg-green-100 dark:hover:bg-green-900`}>Run Now</button>
-                                                                    <Link to="/distribution?tab=crl"
-                                                                        className={`${smallButton} bg-gray-100 dark:bg-gray-700/50 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600`}>Edit on Distribution page</Link>
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* LDAP sub-table */}
-                                <div className="p-3 space-y-2 border-t border-gray-300 dark:border-gray-700">
-                                    <h3 className="text-xs font-semibold uppercase text-gray-600 dark:text-gray-400 tracking-wide">LDAP Publishers</h3>
-                                    {group.ldap.length === 0 && <div className="text-xs text-gray-600 dark:text-gray-400">None.</div>}
-                                    {group.ldap.length > 0 && (
-                                        <div className="overflow-x-auto">
-                                            <table className="w-full text-xs">
-                                                <thead className="text-left text-gray-600 dark:text-gray-400">
-                                                    <tr>
-                                                        <th className="px-2 py-1">Host</th>
-                                                        <th className="px-2 py-1">Base DN</th>
-                                                        <th className="px-2 py-1">Update</th>
-                                                        <th className="px-2 py-1">Last</th>
-                                                        <th className="px-2 py-1">Next</th>
-                                                        <th className="px-2 py-1">Publishes</th>
-                                                        <th className="px-2 py-1">Status</th>
-                                                        <th className="px-2 py-1 text-right">Actions</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody>
-                                                    {group.ldap.map((l) => {
-                                                        const flags = [
-                                                            l.publishCACert ? 'CA' : null,
-                                                            l.publishCRL ? 'CRL' : null,
-                                                            l.publishDelta ? 'Δ' : null,
-                                                            l.publishUserCerts ? 'Users' : null,
-                                                        ].filter(Boolean).join(', ');
-                                                        return (
-                                                            <tr key={l.id} className="border-t border-gray-300 dark:border-gray-700">
-                                                                <td className="px-2 py-1.5 text-gray-900 dark:text-white">{l.host}:{l.port}</td>
-                                                                <td className="px-2 py-1.5 font-mono">{l.baseDn}</td>
-                                                                <td className="px-2 py-1.5 font-mono">{l.updateInterval}</td>
-                                                                <td className="px-2 py-1.5"><TimeCell iso={l.lastUpdatedUtc} now={now} /></td>
-                                                                <td className="px-2 py-1.5"><TimeCell iso={l.nextUpdateUtc} now={now} /></td>
-                                                                <td className="px-2 py-1.5">{flags || '-'}</td>
-                                                                <td className="px-2 py-1.5"><StatusBadge status={l.enabled ? 'enabled' : 'disabled'} /></td>
-                                                                <td className="px-2 py-1.5 text-right">
-                                                                    <div className="inline-flex gap-1 items-center">
-                                                                        <button onClick={() => handleRunLdap(l)}
-                                                                            className={`${smallButton} bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-300 border-green-300 dark:border-green-700 hover:bg-green-100 dark:hover:bg-green-900`}>Run Now</button>
-                                                                        <Link to={`/distribution?tab=ldap${l.certificateAuthorityId ? `&caId=${l.certificateAuthorityId}` : ''}`}
-                                                                            className={`${smallButton} bg-gray-100 dark:bg-gray-700/50 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-200 dark:hover:bg-gray-600`}>Edit on Distribution page</Link>
-                                                                    </div>
-                                                                </td>
-                                                            </tr>
-                                                        );
-                                                    })}
-                                                </tbody>
-                                            </table>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                );
-            })}
+            <DataTable<CrlScheduleEntry>
+                tableId="crl-schedules"
+                title="CRL Schedules"
+                rows={crl}
+                rowKey={(c) => c.taskId}
+                loading={loading && !schedules}
+                empty="No CRL schedules configured."
+                columns={crlColumns}
+                selectable
+                bulkActions={crlBulk}
+                exportFileName="crl-schedules"
+                renderDrawer={(c) => <CrlDrawer entry={c} now={now} />}
+                drawerTitle={(c) => c.name}
+            />
+            <DataTable<LdapPublisherEntry>
+                tableId="ldap-publishers"
+                title="LDAP Publishers"
+                rows={ldap}
+                rowKey={(l) => l.id}
+                loading={loading && !schedules}
+                empty="No LDAP publishers configured."
+                columns={ldapColumns}
+                selectable
+                bulkActions={ldapBulk}
+                exportFileName="ldap-publishers"
+                renderDrawer={(l) => <LdapDrawer entry={l} now={now} />}
+                drawerTitle={(l) => `${l.host}:${l.port}`}
+            />
         </section>
     );
 };
@@ -739,8 +576,8 @@ const Schedules: React.FC = () => {
             )}
 
             <HealthStrip health={health} now={now} />
-            <SystemJobsSection jobs={jobs} health={health} now={now} onChanged={reload} />
-            <SchedulesSection schedules={schedules} now={now} onChanged={reload} />
+            <SystemJobsSection jobs={jobs} health={health} loading={loading} now={now} onChanged={reload} />
+            <SchedulesSection schedules={schedules} loading={loading} now={now} onChanged={reload} />
             <SchedulerConfigSection health={health} onChanged={reload} />
         </div>
     );

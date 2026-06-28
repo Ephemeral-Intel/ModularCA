@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
+using ModularCA.API.Controllers.v1.Auth;
 using ModularCA.API.Filters;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Database;
@@ -24,11 +26,13 @@ namespace ModularCA.API.Controllers.v1.Admin
         ICrlConfigurationService crlConfigService,
         IAuditService audit,
         ICurrentUserService currentUser,
+        IDistributedCache cache,
         ModularCADbContext db) : ControllerBase
     {
         private readonly ICrlConfigurationService _crlConfigService = crlConfigService;
         private readonly IAuditService _audit = audit;
         private readonly ICurrentUserService _currentUser = currentUser;
+        private readonly IDistributedCache _cache = cache;
         private readonly ModularCADbContext _db = db;
 
         /// <summary>
@@ -293,6 +297,95 @@ namespace ModularCA.API.Controllers.v1.Admin
 
             return NoContent();
         }
+
+        /// <summary>
+        /// Applies a batch of enable/disable/delete actions across several CRL schedules behind a
+        /// SINGLE step-up token (<see cref="StepUpOps.BulkCrlSchedule"/>, batch-scoped / no target),
+        /// so a multi-row selection on the Distribution page prompts for MFA exactly once instead of
+        /// once per row. Each action is fenced independently (missing / cross-tenant rows are skipped,
+        /// not failed) and the batch never aborts on a single error; a per-id summary is returned.
+        /// Requires <c>CaOperator</c>.
+        /// </summary>
+        [HttpPost("bulk")]
+        [Authorize(Policy = "CaOperator")]
+        public async Task<IActionResult> BulkUpdate([FromBody] BulkCrlScheduleRequest request, [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+        {
+            await _currentUser.EnsureLoadedAsync();
+
+            if (request?.Actions == null || request.Actions.Count == 0)
+                return BadRequest(new { error = "At least one action is required." });
+
+            // ONE BulkCrlSchedule token (no target) authorizes the whole batch — a selection can
+            // span CAs, so the token cannot be bound to a single schedule/CA id.
+            if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.BulkCrlSchedule))
+                return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+            var results = new List<object>();
+            int ok = 0, skipped = 0, failed = 0;
+
+            foreach (var action in request.Actions)
+            {
+                var id = action.Id;
+                var verb = (action.Action ?? string.Empty).Trim().ToLowerInvariant();
+
+                if (verb != "enable" && verb != "disable" && verb != "delete")
+                {
+                    results.Add(new { id, status = "invalid_action" });
+                    skipped++;
+                    continue;
+                }
+
+                var fence = await ResolveAndFenceScheduleAsync(id);
+                if (fence == null)
+                {
+                    results.Add(new { id, status = "denied" });
+                    skipped++;
+                    continue;
+                }
+
+                try
+                {
+                    if (verb == "delete")
+                    {
+                        var deletedSnapshot = await _db.CrlConfigurations.AsNoTracking()
+                            .Where(c => c.TaskId == id)
+                            .Select(c => new { c.TaskId, c.Name, c.CaCertificateId, c.UpdateInterval, c.IsDelta, c.Enabled })
+                            .FirstOrDefaultAsync();
+
+                        await _crlConfigService.DeleteAsync(id);
+
+                        await _audit.LogAsync(AuditActionType.CrlScheduleDeleted, _currentUser.User?.Id, _currentUser.User?.Username,
+                            "CrlSchedule", id.ToString(),
+                            new { ScheduleId = id, Bulk = true, Deleted = deletedSnapshot },
+                            HttpContext.Connection.RemoteIpAddress?.ToString(),
+                            certificateAuthorityId: fence.Value.CaId,
+                            tenantId: fence.Value.TenantId);
+                    }
+                    else
+                    {
+                        var enabled = verb == "enable";
+                        await _crlConfigService.SetEnabledAsync(id, enabled);
+
+                        await _audit.LogAsync(AuditActionType.CrlScheduleStatusChanged, _currentUser.User?.Id, _currentUser.User?.Username,
+                            "CrlSchedule", id.ToString(),
+                            new { ScheduleId = id, Enabled = enabled, Bulk = true },
+                            HttpContext.Connection.RemoteIpAddress?.ToString(),
+                            certificateAuthorityId: fence.Value.CaId,
+                            tenantId: fence.Value.TenantId);
+                    }
+
+                    results.Add(new { id, status = "ok" });
+                    ok++;
+                }
+                catch (Exception ex)
+                {
+                    results.Add(new { id, status = "failed", error = ex.Message });
+                    failed++;
+                }
+            }
+
+            return Ok(new { ok, skipped, failed, results });
+        }
     }
 
     /// <summary>Request body for the CRL schedule enable/disable toggle endpoint.</summary>
@@ -300,5 +393,22 @@ namespace ModularCA.API.Controllers.v1.Admin
     {
         /// <summary>Target enabled flag for the schedule.</summary>
         public bool Enabled { get; set; }
+    }
+
+    /// <summary>Request body for the bulk CRL schedule action endpoint.</summary>
+    public class BulkCrlScheduleRequest
+    {
+        /// <summary>The set of per-schedule actions to apply in this batch.</summary>
+        public List<BulkCrlScheduleAction> Actions { get; set; } = new();
+    }
+
+    /// <summary>A single schedule action within a bulk CRL request.</summary>
+    public class BulkCrlScheduleAction
+    {
+        /// <summary>The schedule's task id.</summary>
+        public Guid Id { get; set; }
+
+        /// <summary>One of <c>enable</c>, <c>disable</c>, or <c>delete</c> (case-insensitive).</summary>
+        public string Action { get; set; } = string.Empty;
     }
 }

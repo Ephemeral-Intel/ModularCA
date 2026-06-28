@@ -45,7 +45,10 @@ public class TenantPolicyChangeService(
         bool? proposedRequireKeyCeremony,
         int? proposedCeremonyRequiredApprovals,
         Guid initiatorUserId,
-        string initiatorUsername)
+        string initiatorUsername,
+        bool userQuorumIncluded = false,
+        int? proposedUserQuorum = null,
+        IReadOnlyList<CaUserQuorumChange>? caUserQuorums = null)
     {
         var tenant = await db.Tenants.FindAsync(tenantId)
             ?? throw new InvalidOperationException($"Tenant {tenantId} not found.");
@@ -63,18 +66,41 @@ public class TenantPolicyChangeService(
                 "Cancel or approve it before starting another.");
         }
 
+        // Snapshot each CA's current quorum for the drift guard (only the CAs the change touches).
+        var caChanges = new List<CaUserQuorumChange>();
+        if (caUserQuorums is { Count: > 0 })
+        {
+            var caIds = caUserQuorums.Select(c => c.CaId).ToList();
+            var cas = await db.CertificateAuthorities.Where(c => caIds.Contains(c.Id)).ToListAsync();
+            foreach (var c in caUserQuorums)
+            {
+                var ca = cas.FirstOrDefault(x => x.Id == c.CaId);
+                if (ca == null) continue; // CA vanished between request and initiate — drop it.
+                caChanges.Add(new CaUserQuorumChange
+                {
+                    CaId = c.CaId,
+                    CurrentQuorum = ca.UserCeremonyRequiredApprovals,
+                    ProposedQuorum = c.ProposedQuorum,
+                });
+            }
+        }
+
         var parameters = new TenantPolicyChangeCeremonyParameters
         {
             TenantId = tenantId,
             CurrentRequireKeyCeremony = tenant.RequireKeyCeremony,
             CurrentCeremonyRequiredApprovals = tenant.CeremonyRequiredApprovals,
             ProposedRequireKeyCeremony = proposedRequireKeyCeremony,
-            ProposedCeremonyRequiredApprovals = proposedCeremonyRequiredApprovals
+            ProposedCeremonyRequiredApprovals = proposedCeremonyRequiredApprovals,
+            UserQuorumIncluded = userQuorumIncluded,
+            CurrentUserQuorum = tenant.UserCeremonyRequiredApprovals,
+            ProposedUserQuorum = proposedUserQuorum,
+            CaUserQuorums = caChanges,
         };
 
         var parametersJson = JsonSerializer.Serialize(parameters);
 
-        var description = $"Downgrade tenant '{tenant.Name}' security policy";
+        var description = $"Change tenant '{tenant.Name}' ceremony / quorum policy";
 
         // Do not pass a quorumOverride — KeyCeremonyService.ResolveQuorumAsync (P2b patch)
         // reads the tenant's current CeremonyRequiredApprovals for TenantPolicyChange.
@@ -139,10 +165,28 @@ public class TenantPolicyChangeService(
 
         // State-drift guard — if the tenant row moved since the ceremony was opened, abort.
         if (tenant.RequireKeyCeremony != parameters.CurrentRequireKeyCeremony
-            || tenant.CeremonyRequiredApprovals != parameters.CurrentCeremonyRequiredApprovals)
+            || tenant.CeremonyRequiredApprovals != parameters.CurrentCeremonyRequiredApprovals
+            || (parameters.UserQuorumIncluded && tenant.UserCeremonyRequiredApprovals != parameters.CurrentUserQuorum))
         {
             throw new InvalidOperationException(
-                "Tenant policy has changed since ceremony was initiated; aborting to prevent unintended downgrade.");
+                "Tenant policy has changed since ceremony was initiated; aborting to prevent an unintended change.");
+        }
+
+        // Load + drift-check the CAs this ceremony touches before mutating any of them.
+        var caChanges = parameters.CaUserQuorums ?? new List<CaUserQuorumChange>();
+        List<Shared.Entities.CertificateAuthorityEntity> cas = new();
+        if (caChanges.Count > 0)
+        {
+            var caIds = caChanges.Select(c => c.CaId).ToList();
+            cas = await db.CertificateAuthorities.Where(c => caIds.Contains(c.Id)).ToListAsync();
+            foreach (var c in caChanges)
+            {
+                var ca = cas.FirstOrDefault(x => x.Id == c.CaId);
+                if (ca == null)
+                    throw new InvalidOperationException($"CA {c.CaId} referenced by ceremony {ceremonyId} not found; aborting.");
+                if (ca.UserCeremonyRequiredApprovals != c.CurrentQuorum)
+                    throw new InvalidOperationException("A CA quorum has changed since the ceremony was initiated; aborting to prevent an unintended change.");
+            }
         }
 
         var beforeRequire = tenant.RequireKeyCeremony;
@@ -154,17 +198,29 @@ public class TenantPolicyChangeService(
         if (parameters.ProposedCeremonyRequiredApprovals.HasValue)
             tenant.CeremonyRequiredApprovals = parameters.ProposedCeremonyRequiredApprovals.Value;
 
+        if (parameters.UserQuorumIncluded)
+            tenant.UserCeremonyRequiredApprovals = parameters.ProposedUserQuorum;
+
+        foreach (var c in caChanges)
+        {
+            var ca = cas.First(x => x.Id == c.CaId);
+            ca.UserCeremonyRequiredApprovals = c.ProposedQuorum;
+        }
+
         await db.SaveChangesAsync();
 
         logger.LogInformation(
             "Applied TenantPolicyChange ceremony {CeremonyId} to tenant {TenantId}: " +
-            "RequireKeyCeremony {BeforeRequire}->{AfterRequire}, CeremonyRequiredApprovals {BeforeApprovals}->{AfterApprovals}.",
+            "RequireKeyCeremony {BeforeRequire}->{AfterRequire}, CeremonyRequiredApprovals {BeforeApprovals}->{AfterApprovals}, " +
+            "UserQuorumChanged={UserQuorumChanged}, CaQuorumsChanged={CaQuorumsChanged}.",
             ceremonyId,
             tenant.Id,
             beforeRequire,
             tenant.RequireKeyCeremony,
             beforeApprovals,
-            tenant.CeremonyRequiredApprovals);
+            tenant.CeremonyRequiredApprovals,
+            parameters.UserQuorumIncluded,
+            caChanges.Count);
 
         return new TenantPolicyChangeAppliedResult(
             tenant.Id,

@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { apiGet, apiPost, apiDelete, apiDeleteWithMfa, API_BASE } from '../api/client';
+import { apiGet, apiPost, apiDeleteWithMfa, API_BASE } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import ConfirmModal from '../components/ConfirmModal';
+import { DataTable, DataTableColumn, DataTableBulkAction } from '../components/DataTable';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -39,7 +41,8 @@ const EabKeyManagementSection: React.FC = () => {
     const [newKey, setNewKey] = useState<NewEabKey | null>(null);
     const [description, setDescription] = useState('');
     const [showCreateForm, setShowCreateForm] = useState(false);
-    const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+    const [confirmDelete, setConfirmDelete] = useState<EabKey | null>(null);
+    const [deleting, setDeleting] = useState(false);
     const [actionError, setActionError] = useState<string | null>(null);
     const [copiedField, setCopiedField] = useState<string | null>(null);
 
@@ -73,16 +76,15 @@ const EabKeyManagementSection: React.FC = () => {
 
     const handleDelete = async (id: string) => {
         setActionError(null);
+        setDeleting(true);
         try {
             await apiDeleteWithMfa(`/api/v1/admin/acme/eab-keys/${id}`, requireStepUp, 'delete-eab-key', id);
-            setDeleteConfirm(null);
             loadKeys();
         } catch (err: any) {
-            if (err.message === 'Step-up MFA cancelled') {
-                setDeleteConfirm(null);
-                return;
-            }
-            setActionError(err.message);
+            if (err.message !== 'Step-up MFA cancelled') setActionError(err.message);
+        } finally {
+            setDeleting(false);
+            setConfirmDelete(null);
         }
     };
 
@@ -101,13 +103,44 @@ const EabKeyManagementSection: React.FC = () => {
 
     const maskKey = () => '••••••••••••••••';
 
+    const columns: DataTableColumn<EabKey>[] = [
+        { key: 'keyId', header: 'Key ID', defaultWidth: 200, minWidth: 140, truncate: false, exportValue: (k) => k.keyId, render: (k) => <span className="font-mono text-xs text-gray-900 dark:text-white truncate">{k.keyId}</span> },
+        { key: 'mac', header: 'MAC Key', defaultWidth: 120, exportValue: () => '(hidden)', render: () => <span className="font-mono text-xs text-gray-500">{maskKey()}</span> },
+        { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (k) => getKeyStatus(k).label, render: (k) => { const s = getKeyStatus(k); return <StatusBadge status={s.status} label={s.label} />; } },
+        { key: 'description', header: 'Description', defaultWidth: 200, flex: true, exportValue: (k) => k.description || '', render: (k) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{k.description || '-'}</span> },
+        { key: 'created', header: 'Created', defaultWidth: 160, exportValue: (k) => formatDate(k.createdAt), render: (k) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(k.createdAt)}</span> },
+        { key: 'usedBy', header: 'Used By', defaultWidth: 150, exportValue: (k) => k.usedByAccountId || '', render: (k) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{k.usedByAccountId || '-'}</span> },
+    ];
+
+    // EAB delete is step-up MFA gated with no bulk endpoint, so Delete is single-select.
+    const bulkActions: DataTableBulkAction<EabKey>[] = [
+        { label: 'Delete', single: true, variant: 'danger', onClick: (rows) => setConfirmDelete(rows[0]) },
+    ];
+
+    const drawer = (k: EabKey) => {
+        const s = getKeyStatus(k);
+        return (
+            <div className="text-sm">
+                <DetailField label="Key ID" value={k.keyId} mono />
+                <DetailField label="Status" value={s.label} />
+                <DetailField label="Description" value={k.description || '-'} />
+                <DetailField label="Created" value={formatDate(k.createdAt)} />
+                <DetailField label="Expires" value={k.expiresAt ? formatDate(k.expiresAt) : 'Never'} />
+                <DetailField label="Used" value={k.isUsed ? 'Yes' : 'No'} />
+                {k.usedAt && <DetailField label="Used At" value={formatDate(k.usedAt)} />}
+                {k.usedByAccountId && <DetailField label="Used By Account" value={k.usedByAccountId} mono />}
+                <p className="text-[11px] text-gray-500 pt-3">The MAC key is shown only once, at creation time.</p>
+            </div>
+        );
+    };
+
     return (
-        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700 flex items-center justify-between">
+        <div className="space-y-3">
+            <div className="flex items-center justify-between">
                 <h2 className="text-sm font-semibold text-gray-900 dark:text-white">EAB Key Management</h2>
                 <button
                     onClick={() => { setShowCreateForm(!showCreateForm); setNewKey(null); }}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-gray-900 dark:text-white text-xs font-medium rounded transition-colors"
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium rounded transition-colors"
                 >
                     + Generate EAB Key
                 </button>
@@ -115,7 +148,7 @@ const EabKeyManagementSection: React.FC = () => {
 
             {/* New key creation form */}
             {showCreateForm && (
-                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-50 dark:bg-gray-900/50">
+                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg px-4 py-3">
                     <div className="flex items-end gap-3">
                         <div className="flex-1">
                             <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">Description (optional)</label>
@@ -124,13 +157,13 @@ const EabKeyManagementSection: React.FC = () => {
                                 value={description}
                                 onChange={(e) => setDescription(e.target.value)}
                                 placeholder="e.g., For staging server"
-                                className="w-full px-3 py-1.5 bg-gray-100 dark:bg-gray-800 border border-gray-400 dark:border-gray-600 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                                className="w-full px-3 py-1.5 bg-gray-50 dark:bg-gray-900 border border-gray-400 dark:border-gray-600 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500"
                             />
                         </div>
                         <button
                             onClick={handleGenerate}
                             disabled={generating}
-                            className="px-4 py-1.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-gray-900 dark:text-white text-xs font-medium rounded transition-colors"
+                            className="px-4 py-1.5 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 text-white text-xs font-medium rounded transition-colors"
                         >
                             {generating ? 'Generating...' : 'Generate'}
                         </button>
@@ -146,7 +179,7 @@ const EabKeyManagementSection: React.FC = () => {
 
             {/* Newly generated key display */}
             {newKey && (
-                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700 bg-green-50 dark:bg-green-900/20 border-l-4 border-l-green-500">
+                <div className="bg-green-50 dark:bg-green-900/20 border border-gray-300 dark:border-gray-700 border-l-4 border-l-green-500 rounded-lg px-4 py-3">
                     <div className="flex items-center gap-2 mb-2">
                         <span className="text-green-800 dark:text-green-400 text-sm font-semibold">New EAB Key Generated</span>
                         <span className="text-xs text-yellow-800 dark:text-yellow-400">(Copy now -- the MAC key will not be shown again)</span>
@@ -175,7 +208,7 @@ const EabKeyManagementSection: React.FC = () => {
                     </div>
                     <button
                         onClick={() => setNewKey(null)}
-                        className="mt-2 text-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:text-gray-200 transition-colors"
+                        className="mt-2 text-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
                     >
                         Dismiss
                     </button>
@@ -183,80 +216,36 @@ const EabKeyManagementSection: React.FC = () => {
             )}
 
             {actionError && (
-                <div className="px-4 py-2 bg-red-50 dark:bg-red-900/30 border-b border-red-300 dark:border-red-700 text-red-800 dark:text-red-300 text-sm">
+                <div className="px-4 py-2 bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded text-red-800 dark:text-red-300 text-sm">
                     {actionError}
                 </div>
             )}
 
-            {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-            {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
+            <DataTable<EabKey>
+                tableId="acme-eab-keys"
+                title="EAB Keys"
+                rows={keys}
+                rowKey={(k) => k.id}
+                loading={loading}
+                error={error}
+                empty="No EAB keys found. Generate one to get started."
+                columns={columns}
+                selectable
+                bulkActions={bulkActions}
+                exportFileName="acme-eab-keys"
+                renderDrawer={drawer}
+                drawerTitle={(k) => k.keyId}
+            />
 
-            {!loading && !error && keys.length === 0 && (
-                <div className="p-4 text-sm text-gray-600 text-center">No EAB keys found. Generate one to get started.</div>
-            )}
-
-            {!loading && !error && keys.length > 0 && (
-                <div className="overflow-x-auto">
-                    <table className="w-full min-w-[600px] text-sm">
-                        <thead>
-                            <tr className="border-b border-gray-300 dark:border-gray-700 text-left">
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">Key ID</th>
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">MAC Key</th>
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">Status</th>
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">Description</th>
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">Created</th>
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">Used By</th>
-                                <th className="px-4 py-2 text-xs font-medium text-gray-600 dark:text-gray-400">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {keys.map((key) => {
-                                const { status, label } = getKeyStatus(key);
-                                return (
-                                    <tr key={key.id} className="border-b border-gray-300 dark:border-gray-700/50 hover:bg-gray-200/30 dark:bg-gray-700/30 transition-colors">
-                                        <td className="px-4 py-2 font-mono text-xs text-gray-900 dark:text-white">{key.keyId}</td>
-                                        <td className="px-4 py-2 font-mono text-xs text-gray-600">{maskKey()}</td>
-                                        <td className="px-4 py-2">
-                                            <StatusBadge status={status} label={label} />
-                                        </td>
-                                        <td className="px-4 py-2 text-xs text-gray-700 dark:text-gray-300">{key.description || '-'}</td>
-                                        <td className="px-4 py-2 text-xs text-gray-600 dark:text-gray-400">{formatDate(key.createdAt)}</td>
-                                        <td className="px-4 py-2 font-mono text-xs text-gray-600 dark:text-gray-400">
-                                            {key.usedByAccountId ? key.usedByAccountId : '-'}
-                                        </td>
-                                        <td className="px-4 py-2">
-                                            {deleteConfirm === key.id ? (
-                                                <div className="flex items-center gap-1">
-                                                    <span className="text-xs text-yellow-800 dark:text-yellow-400 mr-1">Delete?</span>
-                                                    <button
-                                                        onClick={() => handleDelete(key.id)}
-                                                        className="px-2 py-0.5 bg-red-600 hover:bg-red-700 text-gray-900 dark:text-white text-xs rounded transition-colors"
-                                                    >
-                                                        Yes
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setDeleteConfirm(null)}
-                                                        className="px-2 py-0.5 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 text-xs rounded transition-colors"
-                                                    >
-                                                        No
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                <button
-                                                    onClick={() => setDeleteConfirm(key.id)}
-                                                    className="px-2 py-0.5 bg-red-50 dark:bg-red-900/50 hover:bg-red-800 text-red-800 dark:text-red-300 text-xs rounded transition-colors"
-                                                >
-                                                    Delete
-                                                </button>
-                                            )}
-                                        </td>
-                                    </tr>
-                                );
-                            })}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+            <ConfirmModal
+                isOpen={!!confirmDelete}
+                title="Delete EAB Key"
+                message={confirmDelete ? `Delete EAB key "${confirmDelete.keyId}"? This cannot be undone.` : ''}
+                confirmLabel="Delete"
+                loading={deleting}
+                onConfirm={() => confirmDelete && handleDelete(confirmDelete.id)}
+                onCancel={() => setConfirmDelete(null)}
+            />
         </div>
     );
 };
@@ -364,11 +353,13 @@ const AcmeEndpointsSection: React.FC = () => {
 };
 
 /* ─── ACME Audit Section ─── */
+const acmeAuditAction = (e: any): string => e.action || e.operation || e.eventType || '-';
+const acmeAuditIp = (e: any): string => e.clientIp || e.remoteAddress || '';
+
 const AcmeAuditSection: React.FC = () => {
     const [entries, setEntries] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
     useEffect(() => {
         apiGet<any>('/api/v1/admin/audit/acme?pageSize=20')
@@ -377,39 +368,38 @@ const AcmeAuditSection: React.FC = () => {
             .finally(() => setLoading(false));
     }, []);
 
+    const columns: DataTableColumn<any>[] = [
+        { key: 'time', header: 'Time', defaultWidth: 180, minWidth: 140, exportValue: (e) => formatDate(e.timestamp || e.createdAt), render: (e) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(e.timestamp || e.createdAt)}</span> },
+        { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (e) => (e.success !== false ? 'OK' : 'FAIL'), render: (e) => <StatusBadge status={e.success !== false ? 'active' : 'revoked'} label={e.success !== false ? 'OK' : 'FAIL'} /> },
+        { key: 'action', header: 'Action', defaultWidth: 200, flex: true, exportValue: (e) => acmeAuditAction(e), render: (e) => <span className="text-sm text-gray-900 dark:text-white truncate">{acmeAuditAction(e)}</span> },
+        { key: 'clientIp', header: 'Client IP', defaultWidth: 160, exportValue: (e) => acmeAuditIp(e), render: (e) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{acmeAuditIp(e) || '-'}</span> },
+    ];
+
+    const drawer = (entry: any) => (
+        <div className="text-sm">
+            {Object.entries(entry).map(([k, v]) => (
+                <DetailField key={k} label={k} value={typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v ?? '-')} mono={typeof v === 'object'} />
+            ))}
+        </div>
+    );
+
     return (
-        <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Protocol Audit - ACME</h2>
-            </div>
-            {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-            {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-            {!loading && !error && entries.length === 0 && (
-                <div className="p-4 text-sm text-gray-600 text-center">No ACME audit entries found</div>
-            )}
-            {!loading && !error && entries.map((entry, idx) => {
-                const key = entry.id || entry.auditId || String(idx);
-                const expanded = expandedKey === key;
-                return (
-                    <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                        <button onClick={() => setExpandedKey(expanded ? null : key)}
-                            className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors">
-                            <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
-                            <span className="text-xs text-gray-600">{formatDate(entry.timestamp || entry.createdAt)}</span>
-                            <StatusBadge status={entry.success !== false ? 'active' : 'revoked'} label={entry.success !== false ? 'OK' : 'FAIL'} />
-                            <span className="text-sm text-gray-900 dark:text-white">{entry.action || entry.operation || entry.eventType || '-'}</span>
-                            <span className="ml-auto text-xs text-gray-600 truncate max-w-[200px]">{entry.clientIp || entry.remoteAddress || ''}</span>
-                        </button>
-                        {expanded && (
-                            <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-50 dark:bg-gray-900/50">
-                                {Object.entries(entry).map(([k, v]) => (
-                                    <DetailField key={k} label={k} value={typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v ?? '-')} mono={typeof v === 'object'} />
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                );
-            })}
+        <div className="space-y-3">
+            <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Protocol Audit - ACME</h2>
+            <DataTable<any>
+                tableId="acme-audit"
+                title="ACME Audit"
+                rows={entries}
+                rowKey={(e) => e.id || e.auditId || `${e.timestamp || e.createdAt}-${acmeAuditAction(e)}`}
+                loading={loading}
+                error={error}
+                empty="No ACME audit entries found"
+                columns={columns}
+                selectable
+                exportFileName="acme-audit"
+                renderDrawer={drawer}
+                drawerTitle={(e) => acmeAuditAction(e)}
+            />
         </div>
     );
 };

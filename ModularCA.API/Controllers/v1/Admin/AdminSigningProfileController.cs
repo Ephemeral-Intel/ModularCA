@@ -84,6 +84,8 @@ public class AdminSigningProfileController(
         if (currentUser.User == null)
             return Unauthorized();
 
+        // UpdateAsync also replaces the allowed-cert-profile links from r.AllowedCertProfileIds, so the
+        // detail page's unified Save persists the profile and its links in this one step-up-gated call.
         await service.UpdateAsync(id, r);
         await audit.LogAsync(AuditActionType.SigningProfileUpdated, currentUser.User?.Id, currentUser.User?.Username,
             "SigningProfile", id.ToString(), r,

@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
 using ModularCA.API.Controllers.v1.Auth;
+using ModularCA.API.Filters;
 using ModularCA.Auth.Authorization;
 using ModularCA.Auth.Interfaces;
 using ModularCA.Core.Services;
@@ -31,7 +32,8 @@ public partial class AdminTenantController(
     IAuditService audit,
     IDistributedCache cache,
     ICaGroupAuthorizationService groupAuth,
-    ITenantPolicyChangeService tenantPolicyChangeService) : ControllerBase
+    ITenantPolicyChangeService tenantPolicyChangeService,
+    IControlledUserCeremonyService controlledUserSvc) : ControllerBase
 {
     private readonly ModularCADbContext _db = db;
     private readonly ICurrentUserService _currentUser = currentUser;
@@ -39,6 +41,7 @@ public partial class AdminTenantController(
     private readonly IDistributedCache _cache = cache;
     private readonly ICaGroupAuthorizationService _groupAuth = groupAuth;
     private readonly ITenantPolicyChangeService _tenantPolicyChangeService = tenantPolicyChangeService;
+    private readonly IControlledUserCeremonyService _controlledUserSvc = controlledUserSvc;
 
     /// <summary>
     /// Lists all tenants with summary counts for CAs, users, and certificates.
@@ -266,25 +269,17 @@ public partial class AdminTenantController(
                 proposedCeremonyRequiredApprovals = normalized;
         }
 
-        // Determine whether the security-policy change is a downgrade. If yes, a non-
-        // system-super caller must route it through a TenantPolicyChange ceremony;
-        // upgrades (and unchanged values) fall through to the direct-write path.
-        var isDowngrade = _tenantPolicyChangeService.IsDowngrade(
-            tenant.RequireKeyCeremony,
-            tenant.CeremonyRequiredApprovals,
-            proposedRequireKeyCeremony,
-            proposedCeremonyRequiredApprovals);
-
-        bool callerIsSystemSuper = false;
-        if (_currentUser.User != null)
-            callerIsSystemSuper = await _groupAuth.IsSystemAdminAsync(_currentUser.User.Id);
-
-        var gateDowngradeThroughCeremony = isDowngrade && !callerIsSystemSuper;
+        // ANY change to the key-ceremony policy fields is routed through a TenantPolicyChange ceremony
+        // unless the caller is a system-SUPER (who may apply it directly). Unchanged values fall
+        // through to the direct-write path. (Mirrors the combined settings endpoint.)
+        var keyCeremonyChanged = proposedRequireKeyCeremony.HasValue || proposedCeremonyRequiredApprovals.HasValue;
+        bool callerIsSuper = _currentUser.User != null && await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id);
+        var gateThroughCeremony = keyCeremonyChanged && !callerIsSuper;
 
         // KC-07: Disabling ceremony requirement requires step-up MFA. Only enforced on
-        // the direct-write path (system-super or non-downgrade); ceremony path has its
+        // the direct-write path (system-super); the ceremony path has its
         // own multi-party quorum check and does not require step-up MFA at initiation.
-        if (!gateDowngradeThroughCeremony
+        if (!gateThroughCeremony
             && request.RequireKeyCeremony.HasValue
             && tenant.RequireKeyCeremony
             && !request.RequireKeyCeremony.Value)
@@ -328,30 +323,9 @@ public partial class AdminTenantController(
 
         var ceremonyWasRequired = tenant.RequireKeyCeremony;
 
-        // Security-policy fields: only applied inline when the change is NOT a
-        // downgrade being gated through a ceremony. On the gated path we persist
-        // every other field inline and defer the downgrade until the ceremony
-        // executes, while still inline-applying security-policy upgrades.
-        if (gateDowngradeThroughCeremony)
-        {
-            // Apply upgrade-only security-policy changes inline (non-downgrade side).
-            // Because the combined change is a downgrade, at least one of the two
-            // gated fields is going down; the other, if moving in the safer
-            // direction, still persists immediately.
-            if (request.RequireKeyCeremony.HasValue
-                && request.RequireKeyCeremony.Value
-                && !tenant.RequireKeyCeremony)
-            {
-                tenant.RequireKeyCeremony = true;
-            }
-            if (request.CeremonyRequiredApprovals.HasValue)
-            {
-                var normalized = Math.Max(1, request.CeremonyRequiredApprovals.Value);
-                if (normalized > tenant.CeremonyRequiredApprovals)
-                    tenant.CeremonyRequiredApprovals = normalized;
-            }
-        }
-        else
+        // Security-policy fields: applied inline only on the direct-write path (super, or no change).
+        // When gating, they stay unchanged here and are applied when the ceremony executes.
+        if (!gateThroughCeremony)
         {
             if (request.RequireKeyCeremony.HasValue)
                 tenant.RequireKeyCeremony = request.RequireKeyCeremony.Value;
@@ -377,9 +351,9 @@ public partial class AdminTenantController(
                 HttpContext.Connection.RemoteIpAddress?.ToString());
         }
 
-        // If we gated a downgrade behind a ceremony, open it now and return 202
+        // If we gated a key-ceremony change behind a ceremony, open it now and return 202
         // alongside the (already-persisted) non-gated field updates.
-        if (gateDowngradeThroughCeremony)
+        if (gateThroughCeremony)
         {
             if (_currentUser.User == null)
                 return Unauthorized();
@@ -444,6 +418,200 @@ public partial class AdminTenantController(
             tenant.CeremonyRequiredApprovals
         });
     }
+
+    /// <summary>
+    /// Combined, atomic update of a tenant's editable settings as a single sub-resource:
+    /// org-level ceilings, per-CA issuance quotas, and the tenant + per-CA controlled-user approval
+    /// quorums. Backs the tenant detail page's unified Save. Because any of these fields is considered
+    /// sensitive, the whole save is gated by ONE step-up MFA token (<see cref="StepUpOps.UpdateTenantSettings"/>),
+    /// so editing several fields prompts the operator exactly once. A key-ceremony downgrade by a
+    /// non-system-super caller is still routed through a tenant policy-change ceremony (202), mirroring
+    /// <see cref="Update"/>. PUT replaces the settings representation with the supplied desired state.
+    /// </summary>
+    [HttpPut("{id:guid}/settings")]
+    [RequireStepUp(StepUpOps.UpdateTenantSettings, "id")]
+    public async Task<IActionResult> UpdateSettings(Guid id, [FromBody] UpdateTenantSettingsRequest request)
+    {
+        await _currentUser.EnsureLoadedAsync();
+
+        var tenant = await _db.Tenants.FindAsync(id);
+        if (tenant == null)
+            return NotFound(new { error = $"Tenant with ID {id} not found" });
+
+        // ── key-ceremony (security-policy) downgrade gating — mirrors Update ──
+        bool? proposedRequireKeyCeremony =
+            request.RequireKeyCeremony.HasValue && request.RequireKeyCeremony.Value != tenant.RequireKeyCeremony
+                ? request.RequireKeyCeremony
+                : null;
+        int? proposedCeremonyRequiredApprovals = null;
+        if (request.CeremonyRequiredApprovals.HasValue)
+        {
+            var normalized = Math.Max(1, request.CeremonyRequiredApprovals.Value);
+            if (normalized != tenant.CeremonyRequiredApprovals)
+                proposedCeremonyRequiredApprovals = normalized;
+        }
+
+        var keyCeremonyChanged = proposedRequireKeyCeremony.HasValue || proposedCeremonyRequiredApprovals.HasValue;
+
+        // Only a system-SUPER may change ceremony/quorum thresholds directly. A regular system/CA admin
+        // routes ANY such change (up or down) through a TenantPolicyChange ceremony. The single
+        // UpdateTenantSettings step-up token (validated by the filter) covers the direct-write path.
+        bool callerIsSuper = _currentUser.User != null && await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id);
+
+        // ── validate user-approval quorums up-front (tenant is the ceiling for its CAs) ──
+        if (request.ApplyUserQuorums)
+        {
+            if (request.UserQuorum is int tq && tq < 1)
+                return BadRequest(new { error = "Tenant quorum must be at least 1, or null to inherit." });
+
+            var tenantQuorumEffective = Math.Max(1, request.UserQuorum ?? 1);
+            foreach (var cq in request.CaQuorums)
+            {
+                if (cq.Quorum is int q)
+                {
+                    if (q < 1)
+                        return BadRequest(new { error = "A CA quorum must be at least 1, or null to inherit." });
+                    if (q > tenantQuorumEffective)
+                        return BadRequest(new { error = $"A CA's quorum can't exceed its tenant's ({tenantQuorumEffective}). Use {tenantQuorumEffective} or lower, or clear it to inherit." });
+                }
+            }
+        }
+
+        // ── load + validate the CA quota groups we'll touch ──
+        var groupIds = request.CaQuotas.Select(c => c.GroupId).ToList();
+        var groups = await _db.CaGroups.Include(g => g.Grants)
+            .Where(g => groupIds.Contains(g.Id)).ToListAsync();
+        foreach (var qd in request.CaQuotas)
+        {
+            var group = groups.FirstOrDefault(g => g.Id == qd.GroupId);
+            if (group == null)
+                return NotFound(new { error = $"Group {qd.GroupId} not found." });
+            if (group.TemplateName != "Administrator" && !group.Grants.Any(gr => gr.Capability == Capabilities.CaManage))
+                return BadRequest(new { error = "Quotas can only be configured on admin-level groups." });
+            if (qd.MaxCertificates < 0 || qd.MaxPendingRequests < 0)
+                return BadRequest(new { error = "Quota values must be 0 (unlimited) or a positive integer." });
+        }
+
+        // ── per-CA user-quorum targets, scoped to this tenant ──
+        var caIds = request.CaQuorums.Select(c => c.CaId).ToList();
+        var cas = request.ApplyUserQuorums
+            ? await _db.CertificateAuthorities.Where(c => c.TenantId == id && caIds.Contains(c.Id)).ToListAsync()
+            : new List<CertificateAuthorityEntity>();
+
+        // ── compute which ceremony/quorum thresholds actually change (these are ceremony-gated) ──
+        bool userQuorumChanged = request.ApplyUserQuorums && request.UserQuorum != tenant.UserCeremonyRequiredApprovals;
+        var caQuorumChanges = new List<ModularCA.Shared.Models.CaUserQuorumChange>();
+        if (request.ApplyUserQuorums)
+        {
+            foreach (var ca in cas)
+            {
+                var proposedQ = request.CaQuorums.First(c => c.CaId == ca.Id).Quorum;
+                if (proposedQ != ca.UserCeremonyRequiredApprovals)
+                    caQuorumChanges.Add(new ModularCA.Shared.Models.CaUserQuorumChange { CaId = ca.Id, ProposedQuorum = proposedQ });
+            }
+        }
+        var gateThroughCeremony = (keyCeremonyChanged || userQuorumChanged || caQuorumChanges.Count > 0) && !callerIsSuper;
+
+        // ── apply: non-gated tenant fields (always — resource limits, not security thresholds) ──
+        if (request.Description != null) tenant.Description = request.Description;
+        if (request.MaxCertificateAuthorities.HasValue) tenant.MaxCertificateAuthorities = request.MaxCertificateAuthorities.Value;
+        if (request.MaxCertificatesTotal.HasValue) tenant.MaxCertificatesTotal = request.MaxCertificatesTotal.Value;
+        if (request.MaxUsers.HasValue) tenant.MaxUsers = request.MaxUsers.Value;
+
+        var ceremonyWasRequired = tenant.RequireKeyCeremony;
+
+        // ── apply: ceremony/quorum thresholds INLINE only when NOT gating (super, or nothing changed).
+        // When gating, these stay unchanged here and are applied later when the ceremony executes. ──
+        if (!gateThroughCeremony)
+        {
+            if (request.RequireKeyCeremony.HasValue) tenant.RequireKeyCeremony = request.RequireKeyCeremony.Value;
+            if (request.CeremonyRequiredApprovals.HasValue) tenant.CeremonyRequiredApprovals = Math.Max(1, request.CeremonyRequiredApprovals.Value);
+            if (request.ApplyUserQuorums)
+            {
+                tenant.UserCeremonyRequiredApprovals = request.UserQuorum;
+                foreach (var ca in cas)
+                    ca.UserCeremonyRequiredApprovals = request.CaQuorums.First(c => c.CaId == ca.Id).Quorum;
+            }
+        }
+
+        // ── apply: per-CA issuance quotas (not a security threshold — always applied) ──
+        foreach (var group in groups)
+        {
+            var qd = request.CaQuotas.First(c => c.GroupId == group.Id);
+            group.MaxCertificates = qd.MaxCertificates;
+            group.MaxPendingRequests = qd.MaxPendingRequests;
+        }
+
+        await _db.SaveChangesAsync();
+
+        await _audit.LogAsync(AuditActionType.TenantUpdated, _currentUser.User?.Id, _currentUser.User?.Username,
+            "Tenant", tenant.Id.ToString(),
+            new
+            {
+                tenant.Name,
+                SettingsBatch = true,
+                GatedThroughCeremony = gateThroughCeremony,
+                CeremonyRequirementDisabled = !gateThroughCeremony && ceremonyWasRequired && !tenant.RequireKeyCeremony,
+                QuotasUpdated = request.CaQuotas.Count,
+            },
+            HttpContext.Connection.RemoteIpAddress?.ToString());
+
+        // ── ceremony-gated path: open ONE bundled ceremony for all the threshold changes, return 202
+        // alongside the (already-persisted) non-gated changes. ──
+        if (gateThroughCeremony)
+        {
+            if (_currentUser.User == null)
+                return Unauthorized();
+
+            Guid ceremonyId;
+            try
+            {
+                ceremonyId = await _tenantPolicyChangeService.InitiateChangeAsync(
+                    tenant.Id,
+                    proposedRequireKeyCeremony,
+                    proposedCeremonyRequiredApprovals,
+                    _currentUser.User.Id,
+                    _currentUser.User.Username,
+                    userQuorumIncluded: userQuorumChanged,
+                    proposedUserQuorum: userQuorumChanged ? request.UserQuorum : null,
+                    caUserQuorums: caQuorumChanges);
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("already pending", StringComparison.OrdinalIgnoreCase))
+            {
+                return Conflict(new
+                {
+                    error = "A tenant policy-change ceremony is already pending for this tenant. Resolve or cancel it before opening a new one."
+                });
+            }
+
+            Log.Warning(
+                "Tenant settings save gated ceremony/quorum changes behind a ceremony: tenant={TenantId} initiator={Initiator} ceremonyId={CeremonyId}",
+                tenant.Id, _currentUser.User.Username, ceremonyId);
+
+            return Accepted(new
+            {
+                ceremonyId,
+                message = "Changing ceremony or quorum thresholds requires ceremony approval. Approve via /api/v1/admin/ceremonies/{id}/approve.",
+                settings = TenantSettingsRepresentation(tenant),
+            });
+        }
+
+        return Ok(TenantSettingsRepresentation(tenant));
+    }
+
+    /// <summary>The canonical settings representation returned by the settings sub-resource.</summary>
+    private static object TenantSettingsRepresentation(TenantEntity t) => new
+    {
+        t.Id,
+        t.Name,
+        t.Description,
+        t.MaxCertificateAuthorities,
+        t.MaxCertificatesTotal,
+        t.MaxUsers,
+        t.RequireKeyCeremony,
+        t.CeremonyRequiredApprovals,
+        UserQuorum = t.UserCeremonyRequiredApprovals,
+    };
 
     /// <summary>
     /// Disables a tenant (soft delete). The tenant and its CAs remain in the database
@@ -562,4 +730,69 @@ public class UpdateTenantRequest
     /// the person who started the ceremony.
     /// </summary>
     public int? CeremonyRequiredApprovals { get; set; }
+}
+
+/// <summary>
+/// Request body for the combined tenant-settings sub-resource (<c>PUT tenants/{id}/settings</c>).
+/// Carries the full desired state the tenant detail page edits in one Save: ceilings, key-ceremony
+/// policy, per-CA issuance quotas, and tenant/CA user-approval quorums.
+/// </summary>
+public class UpdateTenantSettingsRequest
+{
+    /// <summary>New description.</summary>
+    public string? Description { get; set; }
+
+    /// <summary>New maximum CAs allowed. 0 = unlimited.</summary>
+    public int? MaxCertificateAuthorities { get; set; }
+
+    /// <summary>New maximum total certificates. 0 = unlimited.</summary>
+    public int? MaxCertificatesTotal { get; set; }
+
+    /// <summary>New maximum users. 0 = unlimited.</summary>
+    public int? MaxUsers { get; set; }
+
+    /// <summary>Whether CA creation in this tenant requires a key ceremony.</summary>
+    public bool? RequireKeyCeremony { get; set; }
+
+    /// <summary>Number of approvals required for key ceremonies (clamped to a minimum of 1).</summary>
+    public int? CeremonyRequiredApprovals { get; set; }
+
+    /// <summary>
+    /// When true, the tenant + per-CA user-approval quorum overrides are applied (clearing the
+    /// tenant override when <see cref="UserQuorum"/> is null). When false they are left untouched —
+    /// so a client that couldn't load the quorum tree never accidentally clears it.
+    /// </summary>
+    public bool ApplyUserQuorums { get; set; }
+
+    /// <summary>Tenant user-approval quorum override; null = inherit the System quorum.</summary>
+    public int? UserQuorum { get; set; }
+
+    /// <summary>Per-CA user-approval quorum overrides for this tenant's CAs.</summary>
+    public List<CaQuorumItem> CaQuorums { get; set; } = new();
+
+    /// <summary>Per-CA issuance quota updates, keyed by the CA admin group id.</summary>
+    public List<CaQuotaItem> CaQuotas { get; set; } = new();
+}
+
+/// <summary>A per-CA user-approval quorum override; null <see cref="Quorum"/> inherits the tenant.</summary>
+public class CaQuorumItem
+{
+    /// <summary>The certificate authority id.</summary>
+    public Guid CaId { get; set; }
+
+    /// <summary>The override, or null to inherit the tenant quorum.</summary>
+    public int? Quorum { get; set; }
+}
+
+/// <summary>A per-CA issuance quota update, addressed by the CA admin group id.</summary>
+public class CaQuotaItem
+{
+    /// <summary>The CA admin group id the quota is configured on.</summary>
+    public Guid GroupId { get; set; }
+
+    /// <summary>Maximum active certificates. 0 = unlimited.</summary>
+    public int MaxCertificates { get; set; }
+
+    /// <summary>Maximum pending CSRs. 0 = unlimited.</summary>
+    public int MaxPendingRequests { get; set; }
 }

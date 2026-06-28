@@ -1,15 +1,32 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { apiGet, apiPost } from '../api/client';
+import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { DataTable, DataTableColumn } from '../components/DataTable';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
     return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-function csrStatus(csr: any): 'pending' | 'active' | 'revoked' | 'held' | 'expired' {
-    // A CSR with an issued certificate is always "active" regardless of status string
+/** Converts an ISO-8601 period (e.g. "P1Y", "P90D") to a yyyy-MM-dd "max date" from today — the upper
+ *  bound for the per-cert validity picker. Time components are ignored. Undefined if absent/unparseable. */
+function isoPeriodToMaxDate(iso?: string | null): string | undefined {
+    if (!iso) return undefined;
+    const m = /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?/.exec(iso);
+    if (!m || (!m[1] && !m[2] && !m[3] && !m[4])) return undefined;
+    const dt = new Date();
+    if (m[1]) dt.setFullYear(dt.getFullYear() + parseInt(m[1], 10));
+    if (m[2]) dt.setMonth(dt.getMonth() + parseInt(m[2], 10));
+    if (m[3]) dt.setDate(dt.getDate() + parseInt(m[3], 10) * 7);
+    if (m[4]) dt.setDate(dt.getDate() + parseInt(m[4], 10));
+    return dt.toISOString().slice(0, 10);
+}
+
+export const csrId = (csr: any): string => csr.id || csr.requestId;
+
+export function csrStatus(csr: any): 'pending' | 'active' | 'revoked' | 'held' | 'expired' {
     if (csr.issuedCertificateId) return 'active';
     const s = (csr.status || '').toLowerCase();
     if (s === 'issued' || s === 'completed') return 'active';
@@ -19,8 +36,7 @@ function csrStatus(csr: any): 'pending' | 'active' | 'revoked' | 'held' | 'expir
     return 'pending';
 }
 
-function csrStatusLabel(csr: any): string {
-    // A CSR with an issued certificate should always show as "Issued"
+export function csrStatusLabel(csr: any): string {
     if (csr.issuedCertificateId) return 'Issued';
     const s = (csr.status || '').toLowerCase();
     if (s === 'pendingapproval') return 'Pending Approval';
@@ -32,37 +48,32 @@ function csrStatusLabel(csr: any): string {
     return csr.status || 'Pending';
 }
 
-function decisionBadgeStatus(decision: string): 'active' | 'revoked' {
+export function decisionBadgeStatus(decision: string): 'active' | 'revoked' {
     return decision?.toLowerCase() === 'approved' ? 'active' : 'revoked';
 }
 
-function parseJsonSafe(val: string | null | undefined): string {
+export function parseJsonSafe(val: string | null | undefined): string {
     if (!val) return '';
-    try {
-        const parsed = JSON.parse(val);
-        if (Array.isArray(parsed)) return parsed.join(', ');
-        return String(parsed);
-    } catch { return val; }
+    try { const parsed = JSON.parse(val); if (Array.isArray(parsed)) return parsed.join(', '); return String(parsed); }
+    catch { return val; }
 }
 
-/** Returns true if the CSR is in a state that allows approval */
-function canApprove(csr: any): boolean {
+/** Returns true if the CSR is in a state that allows approval. */
+export function canApprove(csr: any): boolean {
     const s = (csr.status || '').toLowerCase();
     return s === 'pending' || s === 'pendingapproval' || s === 'partiallyapproved';
 }
-
-/** Returns true if the CSR is fully approved and ready for issuance */
-function canIssue(csr: any): boolean {
+/** Returns true if the CSR is fully approved and ready for issuance. */
+export function canIssue(csr: any): boolean {
     return (csr.status || '').toLowerCase() === 'approved';
 }
-
-/** Returns true if the CSR can be cancelled (pending or approved, not yet issued) */
-function canCancel(csr: any): boolean {
+/** Returns true if the CSR can be cancelled (pending or approved, not yet issued). */
+export function canCancel(csr: any): boolean {
     const s = (csr.status || '').toLowerCase();
     return (s === 'approved' || s === 'pending' || s === 'pendingapproval') && !csr.issuedCertificateId;
 }
 
-interface ApprovalRecord {
+export interface ApprovalRecord {
     id: string;
     approverUsername: string;
     decision: string;
@@ -73,587 +84,224 @@ interface ApprovalRecord {
 const STATUS_FILTERS = ['All', 'Pending', 'Approved', 'Issued', 'Rejected', 'Cancelled'] as const;
 
 const CertificateRequests: React.FC = () => {
+    const { showToast } = useToast();
     const [requests, setRequests] = useState<any[]>([]);
     const [statusFilter, setStatusFilter] = useState<string>('Pending');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [selectedCsr, setSelectedCsr] = useState<any>(null);
-    const [issueLoading, setIssueLoading] = useState(false);
-    const [issueError, setIssueError] = useState<string | null>(null);
-    const [issueSuccess, setIssueSuccess] = useState<string | null>(null);
-    const [showRejectModal, setShowRejectModal] = useState(false);
-    const [rejectReason, setRejectReason] = useState('');
-    const [rejectLoading, setRejectLoading] = useState(false);
-    const [rejectError, setRejectError] = useState<string | null>(null);
 
-    // Approval workflow state
-    const [approveComment, setApproveComment] = useState('');
-    const [approveLoading, setApproveLoading] = useState(false);
-    const [approveMessage, setApproveMessage] = useState<string | null>(null);
-    const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
-    const [approvalsLoading, setApprovalsLoading] = useState(false);
-
-    // Cancel workflow state
-    const [showCancelModal, setShowCancelModal] = useState(false);
-    const [cancelReason, setCancelReason] = useState('');
-    const [cancelLoading, setCancelLoading] = useState(false);
-    const [cancelError, setCancelError] = useState<string | null>(null);
+    // Bulk approve/deny/issue — approve & deny carry one shared message; issue takes an optional
+    // per-certificate "valid until" (within each cert's profile range).
+    const [bulk, setBulk] = useState<{ type: 'approve' | 'deny' | 'issue'; rows: any[] } | null>(null);
+    const [bulkMessage, setBulkMessage] = useState('');
+    const [bulkBusy, setBulkBusy] = useState(false);
+    const [certProfiles, setCertProfiles] = useState<any[]>([]);
+    const [issueValidity, setIssueValidity] = useState<Record<string, string>>({}); // csrId → yyyy-MM-dd
 
     const loadRequests = () => {
         setLoading(true);
         setError(null);
         apiGet<any[]>('/api/v1/admin/requests')
-            .then((data) => {
-                setRequests(Array.isArray(data) ? data : []);
-                setLoading(false);
-            })
-            .catch((err) => {
-                setError(err.message || 'Failed to load requests');
-                setLoading(false);
-            });
+            .then((data) => { setRequests(Array.isArray(data) ? data : []); setLoading(false); })
+            .catch((err) => { setError(err.message || 'Failed to load requests'); setLoading(false); });
     };
 
-    useEffect(() => { loadRequests(); }, []);
-
-    const loadApprovals = useCallback((csrId: string) => {
-        setApprovalsLoading(true);
-        apiGet<ApprovalRecord[]>(`/api/v1/admin/requests/${csrId}/approvals`)
-            .then((data) => {
-                setApprovals(Array.isArray(data) ? data : []);
-            })
-            .catch(() => {
-                setApprovals([]);
-            })
-            .finally(() => setApprovalsLoading(false));
+    useEffect(() => {
+        loadRequests();
+        // Cert profiles give each request's validity ceiling for the per-cert issue picker.
+        apiGet<any>('/api/v1/admin/cert-profiles')
+            .then((d) => setCertProfiles(Array.isArray(d) ? d : (d.items || d.profiles || [])))
+            .catch(() => { /* picker just falls back to unbounded + backend enforcement */ });
     }, []);
 
-    const openDetail = (csr: any) => {
-        setSelectedCsr(csr);
-        setIssueError(null);
-        setApproveComment('');
-        setApproveMessage(null);
-        setApprovals([]);
-        const csrId = csr.id || csr.requestId;
-        // Load approvals for any CSR that may have them
+    const today = new Date().toISOString().slice(0, 10);
+    const csrProfileMaxDate = (c: any): string | undefined => {
+        const cpId = c.certificateProfileId || c.certProfileId;
+        if (!cpId) return undefined;
+        const cp = certProfiles.find((p) => (p.id || p.certProfileId) === cpId);
+        return isoPeriodToMaxDate(cp?.validityPeriodMax);
+    };
+
+    // Bucket each request into a filter tab. "Pending" must include the approval-workflow states
+    // (PendingApproval / PartiallyApproved / null) — not just exact "Pending" — otherwise requests
+    // awaiting approval are hidden under the default filter while the dashboard still counts them.
+    const matchesFilter = (csr: any, filter: string): boolean => {
+        if (filter === 'All') return true;
         const s = (csr.status || '').toLowerCase();
-        if (s === 'pendingapproval' || s === 'partiallyapproved' || s === 'approved' || s === 'rejected' || s === 'issued') {
-            loadApprovals(csrId);
+        const issued = !!csr.issuedCertificateId || s === 'issued' || s === 'completed';
+        switch (filter) {
+            case 'Issued': return issued;
+            case 'Approved': return !issued && s === 'approved';
+            case 'Pending': return !issued && (s === '' || s === 'pending' || s === 'pendingapproval' || s === 'partiallyapproved');
+            case 'Rejected': return s === 'rejected' || s === 'failed';
+            case 'Cancelled': return s === 'cancelled';
+            default: return false;
         }
     };
+    const filtered = requests.filter((csr) => matchesFilter(csr, statusFilter));
 
-    const handleApprove = async (csr: any) => {
-        const csrId = csr.id || csr.requestId;
-        setApproveLoading(true);
-        setIssueError(null);
-        setApproveMessage(null);
-        try {
-            const result = await apiPost<{ message: string; status: string; approvalCount: number; requiredCount: number }>(
-                `/api/v1/admin/requests/${csrId}/approve`,
-                { comment: approveComment }
-            );
-            setApproveMessage(result.message || `Approval recorded (${result.approvalCount}/${result.requiredCount})`);
-            setApproveComment('');
-            // Refresh the CSR list and approvals
-            loadRequests();
-            loadApprovals(csrId);
-            // Update the selected CSR in place with new status info
-            setSelectedCsr((prev: any) => prev ? {
-                ...prev,
-                status: result.status,
-                approvalCount: result.approvalCount,
-                requiredCount: result.requiredCount,
-            } : null);
-        } catch (err: any) {
-            setIssueError(err.message || 'Failed to record approval');
-        } finally {
-            setApproveLoading(false);
-        }
-    };
+    const openBulk = (type: 'approve' | 'deny' | 'issue', rows: any[]) => { setBulkMessage(''); setIssueValidity({}); setBulk({ type, rows }); };
 
-    const handleIssue = async (csr: any) => {
-        setIssueLoading(true);
-        setIssueError(null);
-        setIssueSuccess(null);
-        try {
-            const result = await apiPost<any>('/api/v1/admin/certificates/issue', {
-                csrId: csr.id || csr.requestId,
-                notBefore: new Date().toISOString(),
-                notAfter: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-                includeRoot: false,
-            });
-            const warnings = result?.warnings as string[] | undefined;
-            if (warnings && warnings.length > 0) {
-                setIssueSuccess(`Certificate issued for ${csr.subjectName || csr.subject}. Warning: ${warnings.join('; ')}`);
-            } else {
-                setIssueSuccess(`Certificate issued for ${csr.subjectName || csr.subject}`);
+    // Loop the (no-step-up) per-request endpoints; approve/deny share one message, issue takes an
+    // optional per-cert validity. Never abort on a single failure — collect each failure's reason
+    // (e.g. "You cannot approve your own request") and surface them in the summary toast.
+    const runBulk = async () => {
+        if (!bulk) return;
+        const { type, rows } = bulk;
+        const msg = bulkMessage.trim();
+        if (type === 'deny' && !msg) return; // reason required to deny
+        setBulkBusy(true);
+        let ok = 0;
+        const failReasons: string[] = [];
+        for (const c of rows) {
+            const cid = csrId(c);
+            try {
+                if (type === 'approve') await apiPost(`/api/v1/admin/requests/${cid}/approve`, { comment: msg });
+                else if (type === 'deny') await apiPost(`/api/v1/admin/requests/${cid}/reject`, { reason: msg });
+                // Optional per-cert "valid until" (end of the chosen day); blank → omit so the backend
+                // coalesces validity from the effective cert profile (clamped to the issuing CA).
+                else await apiPost('/api/v1/admin/certificates/issue', {
+                    csrId: cid,
+                    ...(issueValidity[cid] ? { notAfter: new Date(`${issueValidity[cid]}T23:59:59Z`).toISOString() } : {}),
+                });
+                ok++;
+            } catch (err: any) {
+                failReasons.push(err?.message || 'Failed');
             }
-            setSelectedCsr(null);
-            loadRequests();
-        } catch (err: any) {
-            setIssueError(err.message || 'Failed to issue certificate');
-        } finally {
-            setIssueLoading(false);
         }
+        setBulkBusy(false);
+        setBulk(null);
+        setBulkMessage('');
+        // Two stacked toasts: a success for what went through, then a warning per distinct failure
+        // reason — so "Approved 5" sits above "1 failed — You cannot approve your own request".
+        const noun = type === 'issue' ? 'certificate' : 'request';
+        const verb = type === 'approve' ? 'Approved' : type === 'deny' ? 'Denied' : 'Issued';
+        if (ok > 0) showToast('success', `${verb} ${ok} ${noun}${ok === 1 ? '' : 's'}`);
+        if (failReasons.length > 0) {
+            const distinct = Array.from(new Set(failReasons));
+            showToast('warning', `${failReasons.length} failed — ${distinct.join('; ')}`);
+        }
+        if (ok === 0 && failReasons.length === 0) showToast('info', 'No changes made');
+        loadRequests();
     };
 
-    const handleReject = async () => {
-        if (!selectedCsr || !rejectReason.trim()) return;
-        setRejectLoading(true);
-        setRejectError(null);
-        try {
-            const csrId = selectedCsr.id || selectedCsr.requestId;
-            await apiPost(`/api/v1/admin/requests/${csrId}/reject`, { reason: rejectReason });
-            setIssueSuccess(`Request rejected: ${selectedCsr.subjectName || selectedCsr.subject}`);
-            setShowRejectModal(false);
-            setSelectedCsr(null);
-            setRejectReason('');
-            loadRequests();
-        } catch (err: any) {
-            setRejectError(err.message || 'Failed to reject request');
-        } finally {
-            setRejectLoading(false);
-        }
-    };
+    const columns: DataTableColumn<any>[] = [
+        { key: 'status', header: 'Status', defaultWidth: 180, minWidth: 120, truncate: false, exportValue: (c) => csrStatusLabel(c), render: (c) => <StatusBadge status={csrStatus(c)} label={csrStatusLabel(c)} /> },
+        { key: 'subject', header: 'Subject', defaultWidth: 280, minWidth: 160, flex: true, exportValue: (c) => c.subjectName || c.subject || '', render: (c) => <span className="text-sm text-gray-800 dark:text-gray-200 truncate">{c.subjectName || c.subject}</span> },
+        { key: 'algorithm', header: 'Algorithm', defaultWidth: 110, exportValue: (c) => c.keyAlgorithm || '', render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{c.keyAlgorithm}</span> },
+        { key: 'size', header: 'Size', defaultWidth: 80, exportValue: (c) => (c.keySize ?? ''), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{c.keySize}</span> },
+        { key: 'submitted', header: 'Submitted', defaultWidth: 160, exportValue: (c) => formatDate(c.submittedAt), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(c.submittedAt)}</span> },
+    ];
 
-    const handleCancel = async () => {
-        if (!selectedCsr || !cancelReason.trim()) return;
-        setCancelLoading(true);
-        setCancelError(null);
-        try {
-            const csrId = selectedCsr.id || selectedCsr.requestId;
-            await apiPost(`/api/v1/admin/requests/${csrId}/cancel`, { reason: cancelReason });
-            setIssueSuccess(`Request cancelled: ${selectedCsr.subjectName || selectedCsr.subject}`);
-            setShowCancelModal(false);
-            setSelectedCsr(null);
-            setCancelReason('');
-            loadRequests();
-        } catch (err: any) {
-            setCancelError(err.message || 'Failed to cancel request');
-        } finally {
-            setCancelLoading(false);
-        }
-    };
-
-    const actionInProgress = issueLoading || approveLoading || cancelLoading;
+    const drawer = (c: any) => (
+        <div className="text-sm">
+            <DetailField label="Subject" value={c.subjectName || c.subject} />
+            <DetailField label="Status" value={csrStatusLabel(c)} />
+            <DetailField label="Key Algorithm" value={c.keyAlgorithm} />
+            <DetailField label="Key Size" value={c.keySize} />
+            <DetailField label="Signature Algorithm" value={c.signatureAlgorithm} />
+            <DetailField label="SANs" value={parseJsonSafe(c.subjectAlternativeNames)} />
+            <DetailField label="Submitted" value={formatDate(c.submittedAt)} />
+            <p className="text-[11px] text-gray-500 pt-3">Open the full page to approve, reject, cancel or issue.</p>
+        </div>
+    );
 
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
                 <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Certificate Requests</h1>
                 <div className="flex gap-2 items-center">
                     <div className="flex rounded overflow-hidden border border-gray-400 dark:border-gray-600">
                         {STATUS_FILTERS.map((f) => (
                             <button key={f} onClick={() => setStatusFilter(f)}
-                                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                                    statusFilter === f
-                                        ? 'bg-blue-600 text-gray-900 dark:text-white'
-                                        : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
-                                }`}>
+                                className={`px-3 py-1.5 text-xs font-medium transition-colors ${statusFilter === f ? 'bg-blue-600 text-white' : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'}`}>
                                 {f}
                             </button>
                         ))}
                     </div>
-                    <button
-                        onClick={loadRequests}
-                        className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                    >
-                        Refresh
-                    </button>
+                    <button onClick={loadRequests} className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">Refresh</button>
                 </div>
             </div>
 
-            {issueSuccess && (
-                <div className="bg-green-50 dark:bg-green-900/30 border border-green-300 dark:border-green-700 rounded px-4 py-3">
-                    <p className="text-sm text-green-800 dark:text-green-300">{issueSuccess}</p>
-                </div>
-            )}
+            <DataTable<any>
+                tableId="certificate-requests"
+                title="Certificate Requests"
+                rows={filtered}
+                rowKey={csrId}
+                loading={loading}
+                error={error}
+                empty="No certificate requests found"
+                columns={columns}
+                selectable
+                bulkActions={[
+                    { label: 'Approve', variant: 'primary', enabledFor: canApprove, onClick: (rows) => openBulk('approve', rows) },
+                    { label: 'Deny', variant: 'danger', enabledFor: canApprove, onClick: (rows) => openBulk('deny', rows) },
+                    { label: 'Issue', variant: 'primary', enabledFor: canIssue, onClick: (rows) => openBulk('issue', rows) },
+                ]}
+                exportFileName="certificate-requests"
+                renderDrawer={drawer}
+                drawerTitle={(c) => c.subjectName || c.subject || 'Certificate Request'}
+                detailPath={(c) => `/certificates/requests/${csrId(c)}`}
+            />
 
-            {/* Request List */}
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
-                        Certificate Requests
-                        {!loading && <span className="text-gray-600 font-normal ml-2">({requests.filter((csr) => {
-                            if (statusFilter === 'All') return true;
-                            const effectiveStatus = csr.issuedCertificateId ? 'Issued' : (csr.status || 'Pending');
-                            return effectiveStatus.toLowerCase() === statusFilter.toLowerCase();
-                        }).length})</span>}
-                    </h3>
-                </div>
-
-                <div>
-                    {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                    {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-                    {!loading && !error && requests.length === 0 && (
-                        <div className="p-4 text-sm text-gray-600 text-center">No pending certificate requests</div>
-                    )}
-
-                    {/* Table header */}
-                    {!loading && !error && requests.length > 0 && (
-                        <div className="px-4 py-2 border-b border-gray-300 dark:border-gray-700 flex items-center gap-4 text-xs text-gray-600 font-semibold">
-                            <span className="w-16">Status</span>
-                            <span className="flex-1">Subject</span>
-                            <span className="w-20">Algorithm</span>
-                            <span className="w-16">Size</span>
-                            <span className="w-36">Submitted</span>
-                        </div>
-                    )}
-
-                    {!loading && !error && requests
-                        .filter((csr) => {
-                            if (statusFilter === 'All') return true;
-                            const effectiveStatus = csr.issuedCertificateId ? 'Issued' : (csr.status || 'Pending');
-                            return effectiveStatus.toLowerCase() === statusFilter.toLowerCase();
-                        })
-                        .map((csr) => {
-                        const key = csr.id || csr.requestId;
-                        return (
-                            <div
-                                key={key}
-                                className="px-4 py-3 border-b border-gray-300 dark:border-gray-700 last:border-b-0 flex items-center gap-4 cursor-pointer hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
-                                onClick={() => openDetail(csr)}
-                            >
-                                <span className="w-16">
-                                    <StatusBadge status={csrStatus(csr)} label={csrStatusLabel(csr)} />
-                                </span>
-                                <span className="flex-1 text-sm text-gray-800 dark:text-gray-200 truncate">{csr.subjectName || csr.subject}</span>
-                                <span className="w-20 text-xs text-gray-600 dark:text-gray-400">{csr.keyAlgorithm}</span>
-                                <span className="w-16 text-xs text-gray-600 dark:text-gray-400">{csr.keySize}</span>
-                                <span className="w-36 text-xs text-gray-600">{formatDate(csr.submittedAt)}</span>
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
-
-            {/* Detail Modal */}
-            {selectedCsr && (
-                <div
-                    className="fixed inset-0 bg-black/25 dark:bg-black/60 flex items-center justify-center z-50"
-                    onClick={() => !actionInProgress && setSelectedCsr(null)}
-                >
-                    <div
-                        className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg shadow-2xl w-full max-w-lg mx-4 max-h-[80vh] overflow-y-auto"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {/* Header */}
-                        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-300 dark:border-gray-700">
-                            <h3 className="text-sm font-semibold text-gray-900 dark:text-white truncate">
-                                {selectedCsr.subjectName || selectedCsr.subject || 'Certificate Request'}
+            {/* Bulk approve / deny — one message for the whole batch */}
+            {bulk && (
+                <div className="fixed inset-0 bg-black/30 dark:bg-black/70 flex items-center justify-center z-[60]" onClick={() => !bulkBusy && setBulk(null)}>
+                    <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg shadow-2xl w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+                        <div className="px-5 py-4 border-b border-gray-300 dark:border-gray-700">
+                            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
+                                {bulk.type === 'approve' ? 'Approve' : bulk.type === 'deny' ? 'Deny' : 'Issue'} {bulk.rows.length} {bulk.type === 'issue' ? 'certificate' : 'request'}{bulk.rows.length === 1 ? '' : 's'}
                             </h3>
-                            <button
-                                onClick={() => !actionInProgress && setSelectedCsr(null)}
-                                className="text-gray-600 hover:text-gray-900 dark:hover:text-white dark:text-white text-lg transition-colors"
-                            >
-                                ✕
-                            </button>
                         </div>
-
-                        {/* Body */}
-                        <div className="px-5 py-4 text-sm text-gray-700 dark:text-gray-300 space-y-1">
-                            {(selectedCsr.status || '').toLowerCase() === 'rejected' && (
-                                <div className="bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded px-3 py-2 mb-3">
-                                    <span className="text-xs font-semibold text-red-800 dark:text-red-400">REJECTED</span>
-                                    {selectedCsr.rejectionReason && (
-                                        <span className="text-xs text-red-800 dark:text-red-300 ml-2">— {selectedCsr.rejectionReason}</span>
-                                    )}
+                        <div className="px-5 py-4 space-y-3">
+                            <p className="text-xs text-gray-600 dark:text-gray-400">
+                                {bulk.type === 'approve'
+                                    ? 'This records your approval on each selected request. Requests needing more approvers stay pending.'
+                                    : bulk.type === 'deny'
+                                        ? 'This rejects every selected request. This cannot be undone.'
+                                        : "This issues a certificate for each selected approved request. Validity defaults to each request's cert profile; optionally set an earlier valid-until per certificate below."}
+                            </p>
+                            {bulk.type !== 'issue' && (
+                                <div>
+                                    <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">
+                                        {bulk.type === 'approve' ? 'Approval comment (optional)' : 'Rejection reason *'}
+                                    </label>
+                                    <textarea value={bulkMessage} onChange={(e) => setBulkMessage(e.target.value)} rows={3}
+                                        placeholder={bulk.type === 'approve' ? 'Applied to every approval…' : 'Applied to every rejection…'}
+                                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 resize-none focus:outline-none focus:border-blue-500" />
                                 </div>
                             )}
-
-                            {/* Approval Progress Section */}
-                            {((selectedCsr.status || '').toLowerCase() === 'pendingapproval' ||
-                              (selectedCsr.status || '').toLowerCase() === 'partiallyapproved') && (
-                                <div className="bg-orange-50 dark:bg-orange-900/20 border border-orange-300 dark:border-orange-700/50 rounded px-3 py-3 mb-3">
-                                    <div className="flex items-center justify-between mb-2">
-                                        <span className="text-xs font-semibold text-orange-800 dark:text-orange-300">Approval Progress</span>
-                                        <span className="text-xs font-bold text-orange-800 dark:text-orange-200">
-                                            {selectedCsr.approvalCount ?? 0} / {selectedCsr.requiredCount ?? '?'}
-                                        </span>
+                            {bulk.type === 'issue' && (
+                                <div className="space-y-1.5">
+                                    <div className="flex items-center justify-between px-1">
+                                        <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Valid until (optional)</label>
+                                        <span className="text-[10px] text-gray-500">blank = profile default</span>
                                     </div>
-                                    <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                                        <div
-                                            className="bg-orange-500 h-2 rounded-full transition-all duration-300"
-                                            style={{
-                                                width: selectedCsr.requiredCount
-                                                    ? `${Math.min(100, ((selectedCsr.approvalCount ?? 0) / selectedCsr.requiredCount) * 100)}%`
-                                                    : '0%'
-                                            }}
-                                        />
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Fully approved banner */}
-                            {(selectedCsr.status || '').toLowerCase() === 'approved' && (
-                                <div className="bg-green-50 dark:bg-green-900/30 border border-green-300 dark:border-green-700 rounded px-3 py-2 mb-3">
-                                    <span className="text-xs font-semibold text-green-800 dark:text-green-400">FULLY APPROVED</span>
-                                    <span className="text-xs text-green-800 dark:text-green-300 ml-2">— Ready for certificate issuance</span>
-                                </div>
-                            )}
-
-                            <DetailField label="Subject" value={selectedCsr.subjectName || selectedCsr.subject} />
-                            <DetailField label="Status" value={csrStatusLabel(selectedCsr)} />
-                            <DetailField label="Key Algorithm" value={selectedCsr.keyAlgorithm} />
-                            <DetailField label="Key Size" value={selectedCsr.keySize} />
-                            <DetailField label="Signature Algorithm" value={selectedCsr.signatureAlgorithm} />
-                            <DetailField label="SANs" value={parseJsonSafe(selectedCsr.subjectAlternativeNames)} />
-                            <DetailField label="Submitted" value={formatDate(selectedCsr.submittedAt)} />
-                            {selectedCsr.certProfileId && <DetailField label="Cert Profile ID" value={selectedCsr.certProfileId} mono />}
-                            {selectedCsr.signingProfileId && <DetailField label="Signing Profile ID" value={selectedCsr.signingProfileId} mono />}
-                            <DetailField label="Request ID" value={selectedCsr.id || selectedCsr.requestId} mono />
-                        </div>
-
-                        {/* Approval History */}
-                        {(approvals.length > 0 || approvalsLoading) && (
-                            <div className="px-5 py-4 border-t border-gray-300 dark:border-gray-700">
-                                <h4 className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide mb-3">Approval History</h4>
-                                {approvalsLoading && (
-                                    <div className="text-xs text-gray-600 text-center py-2">Loading approvals...</div>
-                                )}
-                                {!approvalsLoading && approvals.length > 0 && (
-                                    <div className="space-y-2">
-                                        {approvals.map((a) => (
-                                            <div key={a.id} className="bg-gray-50/50 dark:bg-gray-900/50 border border-gray-300 dark:border-gray-700 rounded px-3 py-2 flex items-start gap-3">
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center gap-2 mb-0.5">
-                                                        <span className="text-xs font-medium text-gray-800 dark:text-gray-200">{a.approverUsername}</span>
-                                                        <StatusBadge
-                                                            status={decisionBadgeStatus(a.decision)}
-                                                            label={a.decision}
-                                                        />
-                                                    </div>
-                                                    {a.comment && (
-                                                        <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">{a.comment}</div>
-                                                    )}
+                                    <div className="max-h-60 overflow-y-auto border border-gray-300 dark:border-gray-700 rounded divide-y divide-gray-200 dark:divide-gray-700/60">
+                                        {bulk.rows.map((c) => {
+                                            const cid = csrId(c);
+                                            const max = csrProfileMaxDate(c);
+                                            return (
+                                                <div key={cid} className="flex items-center gap-2 px-3 py-2">
+                                                    <span className="flex-1 min-w-0 truncate text-xs text-gray-800 dark:text-gray-200" title={c.subjectName || c.subject}>{c.subjectName || c.subject}</span>
+                                                    <input type="date" value={issueValidity[cid] || ''} min={today} max={max}
+                                                        onChange={(e) => setIssueValidity((prev) => ({ ...prev, [cid]: e.target.value }))}
+                                                        className="px-2 py-1 text-xs bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-gray-900 dark:text-white focus:outline-none focus:border-blue-500" />
                                                 </div>
-                                                <span className="text-xs text-gray-600 whitespace-nowrap flex-shrink-0">
-                                                    {formatDate(a.timestamp)}
-                                                </span>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
-                                )}
-                            </div>
-                        )}
-
-                        {/* Actions */}
-                        <div className="px-5 py-4 border-t border-gray-300 dark:border-gray-700 space-y-3">
-                            {issueError && (
-                                <div className="text-xs text-red-800 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded px-3 py-2">
-                                    {issueError}
-                                </div>
-                            )}
-                            {approveMessage && (
-                                <div className="text-xs text-green-800 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-300 dark:border-green-800 rounded px-3 py-2">
-                                    {approveMessage}
-                                </div>
-                            )}
-
-                            {/* Approve comment input + button */}
-                            {canApprove(selectedCsr) && (
-                                <div className="space-y-2">
-                                    <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400">Approval Comment (optional)</label>
-                                    <input
-                                        type="text"
-                                        value={approveComment}
-                                        onChange={(e) => setApproveComment(e.target.value)}
-                                        placeholder="Add a comment..."
-                                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-green-600"
-                                    />
-                                </div>
-                            )}
-
-                            <div className="flex gap-2 justify-end">
-                                <button
-                                    onClick={() => !actionInProgress && setSelectedCsr(null)}
-                                    className="px-4 py-2 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                    disabled={actionInProgress}
-                                >
-                                    Close
-                                </button>
-                                {canApprove(selectedCsr) && (
-                                    <>
-                                        <button
-                                            onClick={() => { setShowRejectModal(true); setRejectReason(''); setRejectError(null); }}
-                                            disabled={actionInProgress}
-                                            className="px-4 py-2 text-xs bg-red-700 text-gray-900 dark:text-white rounded hover:bg-red-600 transition-colors disabled:opacity-50"
-                                        >
-                                            Reject
-                                        </button>
-                                        <button
-                                            onClick={() => handleApprove(selectedCsr)}
-                                            disabled={actionInProgress}
-                                            className="px-4 py-2 text-xs bg-green-700 text-gray-900 dark:text-white rounded hover:bg-green-600 transition-colors disabled:opacity-50"
-                                        >
-                                            {approveLoading ? 'Approving...' : 'Approve'}
-                                        </button>
-                                    </>
-                                )}
-                                {canCancel(selectedCsr) && (
-                                    <button
-                                        onClick={() => { setShowCancelModal(true); setCancelReason(''); setCancelError(null); }}
-                                        disabled={actionInProgress}
-                                        className="px-4 py-2 text-xs bg-orange-700 text-gray-900 dark:text-white rounded hover:bg-orange-600 transition-colors disabled:opacity-50"
-                                    >
-                                        Cancel Request
-                                    </button>
-                                )}
-                                {canIssue(selectedCsr) && (
-                                    <button
-                                        onClick={() => handleIssue(selectedCsr)}
-                                        disabled={actionInProgress}
-                                        className="px-4 py-2 text-xs bg-blue-700 text-gray-900 dark:text-white rounded hover:bg-blue-600 transition-colors disabled:opacity-50"
-                                    >
-                                        {issueLoading ? 'Issuing...' : 'Issue Certificate'}
-                                    </button>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Reject Reason Modal */}
-            {showRejectModal && selectedCsr && (
-                <div
-                    className="fixed inset-0 bg-black/30 dark:bg-black/70 flex items-center justify-center z-[60]"
-                    onClick={() => !rejectLoading && setShowRejectModal(false)}
-                >
-                    <div
-                        className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg shadow-2xl w-full max-w-md mx-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="px-5 py-4 border-b border-gray-300 dark:border-gray-700">
-                            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Reject Certificate Request</h3>
-                        </div>
-                        <div className="px-5 py-4 space-y-4">
-                            <div className="text-xs text-gray-600 dark:text-gray-400">
-                                Rejecting request for <span className="text-gray-900 dark:text-white font-medium">{selectedCsr.subjectName || selectedCsr.subject}</span>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Reason *</label>
-                                <select
-                                    value={rejectReason}
-                                    onChange={(e) => setRejectReason(e.target.value)}
-                                    className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white focus:outline-none focus:border-blue-500"
-                                >
-                                    <option value="">Select a reason...</option>
-                                    <option value="Policy violation">Policy violation</option>
-                                    <option value="Invalid subject">Invalid subject</option>
-                                    <option value="Weak key">Weak key</option>
-                                    <option value="Duplicate request">Duplicate request</option>
-                                    <option value="Unauthorized requestor">Unauthorized requestor</option>
-                                    <option value="Incorrect profile">Incorrect profile</option>
-                                    <option value="Other">Other</option>
-                                </select>
-                            </div>
-
-                            {rejectReason === 'Other' && (
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Custom reason</label>
-                                    <textarea
-                                        value=""
-                                        onChange={(e) => setRejectReason(e.target.value)}
-                                        rows={2}
-                                        placeholder="Enter rejection reason..."
-                                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white resize-none focus:outline-none focus:border-blue-500"
-                                    />
-                                </div>
-                            )}
-
-                            {rejectError && (
-                                <div className="text-xs text-red-800 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded px-3 py-2">
-                                    {rejectError}
+                                    <p className="text-[10px] text-gray-500 px-1">Capped at each certificate's profile maximum; the server also clamps to the issuing CA and rejects anything below the profile minimum.</p>
                                 </div>
                             )}
                         </div>
                         <div className="px-5 py-4 border-t border-gray-300 dark:border-gray-700 flex gap-2 justify-end">
-                            <button
-                                onClick={() => !rejectLoading && setShowRejectModal(false)}
-                                className="px-4 py-2 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                disabled={rejectLoading}
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                onClick={handleReject}
-                                disabled={rejectLoading || !rejectReason.trim()}
-                                className="px-4 py-2 text-xs bg-red-700 text-gray-900 dark:text-white rounded hover:bg-red-600 transition-colors disabled:opacity-50"
-                            >
-                                {rejectLoading ? 'Rejecting...' : 'Reject Request'}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Cancel Reason Modal */}
-            {showCancelModal && selectedCsr && (
-                <div
-                    className="fixed inset-0 bg-black/30 dark:bg-black/70 flex items-center justify-center z-[60]"
-                    onClick={() => !cancelLoading && setShowCancelModal(false)}
-                >
-                    <div
-                        className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg shadow-2xl w-full max-w-md mx-4"
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <div className="px-5 py-4 border-b border-gray-300 dark:border-gray-700">
-                            <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Cancel Certificate Request</h3>
-                        </div>
-                        <div className="px-5 py-4 space-y-4">
-                            <div className="text-xs text-gray-600 dark:text-gray-400">
-                                Cancelling request for <span className="text-gray-900 dark:text-white font-medium">{selectedCsr.subjectName || selectedCsr.subject}</span>
-                            </div>
-
-                            <div>
-                                <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Reason *</label>
-                                <select
-                                    value={cancelReason}
-                                    onChange={(e) => setCancelReason(e.target.value)}
-                                    className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white focus:outline-none focus:border-blue-500"
-                                >
-                                    <option value="">Select a reason...</option>
-                                    <option value="No longer needed">No longer needed</option>
-                                    <option value="Superseded by new request">Superseded by new request</option>
-                                    <option value="Incorrect parameters">Incorrect parameters</option>
-                                    <option value="Requestor withdrew">Requestor withdrew</option>
-                                    <option value="Other">Other</option>
-                                </select>
-                            </div>
-
-                            {cancelReason === 'Other' && (
-                                <div>
-                                    <label className="block text-xs font-semibold text-gray-600 dark:text-gray-400 mb-1">Custom reason</label>
-                                    <textarea
-                                        onChange={(e) => setCancelReason(e.target.value)}
-                                        rows={2}
-                                        placeholder="Enter cancellation reason..."
-                                        className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded text-sm text-gray-900 dark:text-white resize-none focus:outline-none focus:border-blue-500"
-                                    />
-                                </div>
-                            )}
-
-                            {cancelError && (
-                                <div className="text-xs text-red-800 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded px-3 py-2">
-                                    {cancelError}
-                                </div>
-                            )}
-                        </div>
-                        <div className="px-5 py-4 border-t border-gray-300 dark:border-gray-700 flex gap-2 justify-end">
-                            <button
-                                onClick={() => !cancelLoading && setShowCancelModal(false)}
-                                className="px-4 py-2 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                disabled={cancelLoading}
-                            >
-                                Back
-                            </button>
-                            <button
-                                onClick={handleCancel}
-                                disabled={cancelLoading || !cancelReason.trim()}
-                                className="px-4 py-2 text-xs bg-orange-700 text-gray-900 dark:text-white rounded hover:bg-orange-600 transition-colors disabled:opacity-50"
-                            >
-                                {cancelLoading ? 'Cancelling...' : 'Cancel Request'}
+                            <button onClick={() => setBulk(null)} disabled={bulkBusy} className="px-4 py-2 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors disabled:opacity-50">Cancel</button>
+                            <button onClick={runBulk} disabled={bulkBusy || (bulk.type === 'deny' && !bulkMessage.trim())}
+                                className={`px-4 py-2 text-xs text-white rounded transition-colors disabled:opacity-50 ${bulk.type === 'deny' ? 'bg-red-600 hover:bg-red-700' : bulk.type === 'issue' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-green-600 hover:bg-green-700'}`}>
+                                {bulkBusy
+                                    ? (bulk.type === 'approve' ? 'Approving…' : bulk.type === 'deny' ? 'Denying…' : 'Issuing…')
+                                    : `${bulk.type === 'approve' ? 'Approve' : bulk.type === 'deny' ? 'Deny' : 'Issue'} ${bulk.rows.length}`}
                             </button>
                         </div>
                     </div>

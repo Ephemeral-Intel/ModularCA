@@ -506,6 +506,87 @@ public class AdminGroupController(
     }
 
     /// <summary>
+    /// Adds several users to a group in one step-up-gated request. The single <c>add-group-member</c>
+    /// token authorizes the whole batch (so a multi-user add prompts for MFA once), but each user is
+    /// evaluated independently with the SAME per-user logic as <see cref="AddMember"/> — tenant fence,
+    /// tier guard, duplicate check, and the controlled-user gate. Crucially, promoting a controlled
+    /// user starts its OWN ceremony, so a batch can spawn one ceremony PER controlled user while adding
+    /// uncontrolled users directly. Returns a per-user result summary; never aborts the batch on a
+    /// single user's failure.
+    /// </summary>
+    [HttpPost("{id:guid}/members/bulk")]
+    [Authorize(Policy = "SystemAdmin")]
+    [RequireStepUp(StepUpOps.AddGroupMember, "id")]
+    public async Task<IActionResult> AddMembersBulk(Guid id, [FromBody] AddGroupMembersBulkRequest request)
+    {
+        await _currentUser.EnsureLoadedAsync();
+
+        var group = await _db.CaGroups.FindAsync(id);
+        if (group == null)
+            return NotFound(new { error = $"Group with ID {id} not found" });
+
+        // Tenant fence — same as the single add.
+        var fence = EnsureGroupInAccessibleTenant(group);
+        if (fence != null) return fence;
+
+        if (request.UserIds == null || request.UserIds.Count == 0)
+            return BadRequest(new { error = "At least one userId is required." });
+
+        var groupTier = _controlledUserSvc.ClassifyGroup(group);
+        var callerIsSuper = _currentUser.User != null && await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id);
+
+        var results = new List<BulkMemberResult>();
+        foreach (var userId in request.UserIds.Distinct())
+        {
+            // Tiered promotion + self-assign guard (per user).
+            var tierCheck = await AuthorizeGroupMembershipChangeAsync(group, userId);
+            if (tierCheck != null) { results.Add(new BulkMemberResult { UserId = userId, Status = "denied" }); continue; }
+
+            var user = await _db.Users.FindAsync(userId);
+            if (user == null) { results.Add(new BulkMemberResult { UserId = userId, Status = "not_found" }); continue; }
+
+            var alreadyMember = await _db.CaGroupMembers.AnyAsync(m => m.GroupId == id && m.UserId == userId);
+            if (alreadyMember) { results.Add(new BulkMemberResult { UserId = userId, Username = user.Username, Status = "already_member" }); continue; }
+
+            // Controlled-user gate → a ceremony PER controlled user.
+            if (groupTier != null && _currentUser.User != null && !callerIsSuper)
+            {
+                var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                    new Shared.Models.ControlledUserChangeParameters
+                    {
+                        ChangeType = "AddGroupMember",
+                        TargetUserId = userId,
+                        TargetUsername = user.Username,
+                        GroupId = id,
+                        CertificateAuthorityId = group.CertificateAuthorityId,
+                    },
+                    groupTier.Value,
+                    _currentUser.User.Id,
+                    _currentUser.User.Username ?? string.Empty);
+                results.Add(new BulkMemberResult { UserId = userId, Username = user.Username, Status = "ceremony", CeremonyId = ceremonyId });
+                continue;
+            }
+
+            // Uncontrolled (or super caller) → direct add.
+            _db.CaGroupMembers.Add(new Shared.Entities.CaGroupMemberEntity { GroupId = id, UserId = userId, AddedByUserId = _currentUser.User?.Id });
+            await _db.SaveChangesAsync();
+            await _audit.LogAsync(AuditActionType.GroupMemberAdded, _currentUser.User?.Id, _currentUser.User?.Username,
+                "CaGroup", id.ToString(),
+                new { MemberUserId = userId, MemberUsername = user.Username, TargetGroup = group.Name, IsSystemGroup = group.IsSystemGroup, Bulk = true },
+                HttpContext.Connection.RemoteIpAddress?.ToString());
+            results.Add(new BulkMemberResult { UserId = userId, Username = user.Username, Status = "added" });
+        }
+
+        return Ok(new
+        {
+            added = results.Count(r => r.Status == "added"),
+            ceremonies = results.Count(r => r.Status == "ceremony"),
+            skipped = results.Count(r => r.Status is "already_member" or "not_found" or "denied"),
+            results,
+        });
+    }
+
+    /// <summary>
     /// Removes a user from a group. Requires step-up MFA because membership removal can revoke
     /// the caller's or another admin's effective authorization.
     /// </summary>
@@ -573,6 +654,84 @@ public class AdminGroupController(
 
         return Ok(new { message = "Member removed from group" });
     }
+
+    /// <summary>
+    /// Removes several users from a group in one step-up-gated request. The single
+    /// <c>remove-group-member</c> token authorizes the whole batch (one MFA prompt), but each user is
+    /// evaluated independently with the SAME per-user logic as <see cref="RemoveMember"/> — tenant
+    /// fence, tier guard, membership check, the controlled-user demote gate, and the last-controlled-user
+    /// guard. Demoting a controlled user starts its OWN ceremony, so a batch can spawn one ceremony PER
+    /// controlled user while removing uncontrolled users directly. A user that would be the last
+    /// controlled user of its scope is refused individually (status <c>last_user</c>) without aborting
+    /// the rest. Returns a per-user result summary.
+    /// </summary>
+    [HttpPost("{id:guid}/members/bulk-remove")]
+    [Authorize(Policy = "SystemAdmin")]
+    [RequireStepUp(StepUpOps.RemoveGroupMember, "id")]
+    public async Task<IActionResult> RemoveMembersBulk(Guid id, [FromBody] RemoveGroupMembersBulkRequest request)
+    {
+        await _currentUser.EnsureLoadedAsync();
+
+        var group = await _db.CaGroups.FindAsync(id);
+        if (group == null)
+            return NotFound(new { error = "Group not found" });
+        var fence = EnsureGroupInAccessibleTenant(group);
+        if (fence != null) return fence;
+
+        if (request.UserIds == null || request.UserIds.Count == 0)
+            return BadRequest(new { error = "At least one userId is required." });
+
+        var demoteTier = _controlledUserSvc.ClassifyGroup(group);
+        var callerIsSuper = _currentUser.User != null && await _controlledUserSvc.IsSuperAsync(_currentUser.User.Id);
+
+        var results = new List<BulkMemberResult>();
+        foreach (var userId in request.UserIds.Distinct())
+        {
+            var tierCheck = await AuthorizeGroupMembershipChangeAsync(group, userId);
+            if (tierCheck != null) { results.Add(new BulkMemberResult { UserId = userId, Status = "denied" }); continue; }
+
+            var membership = await _db.CaGroupMembers.FirstOrDefaultAsync(m => m.GroupId == id && m.UserId == userId);
+            if (membership == null) { results.Add(new BulkMemberResult { UserId = userId, Status = "not_found" }); continue; }
+
+            // Controlled-user demote gate → a ceremony PER controlled user, with the last-user guard.
+            if (demoteTier != null && _currentUser.User != null && !callerIsSuper)
+            {
+                if (await _controlledUserSvc.CountDominatingControlledUsersAsync(demoteTier.Value, userId) == 0)
+                { results.Add(new BulkMemberResult { UserId = userId, Status = "last_user" }); continue; }
+
+                var ceremonyId = await _controlledUserSvc.InitiateChangeAsync(
+                    new Shared.Models.ControlledUserChangeParameters
+                    {
+                        ChangeType = "RemoveGroupMember",
+                        TargetUserId = userId,
+                        GroupId = id,
+                        CertificateAuthorityId = group.CertificateAuthorityId,
+                    },
+                    demoteTier.Value,
+                    _currentUser.User.Id,
+                    _currentUser.User.Username ?? string.Empty);
+                results.Add(new BulkMemberResult { UserId = userId, Status = "ceremony", CeremonyId = ceremonyId });
+                continue;
+            }
+
+            _db.CaGroupMembers.Remove(membership);
+            await _db.SaveChangesAsync();
+            await _audit.LogAsync(AuditActionType.GroupMemberRemoved, _currentUser.User?.Id, _currentUser.User?.Username,
+                "CaGroup", id.ToString(),
+                new { MemberUserId = userId, TargetGroup = group.Name, IsSystemGroup = group.IsSystemGroup, Bulk = true },
+                HttpContext.Connection.RemoteIpAddress?.ToString());
+            results.Add(new BulkMemberResult { UserId = userId, Status = "removed" });
+        }
+
+        return Ok(new
+        {
+            removed = results.Count(r => r.Status == "removed"),
+            ceremonies = results.Count(r => r.Status == "ceremony"),
+            refused = results.Count(r => r.Status == "last_user"),
+            skipped = results.Count(r => r.Status is "not_found" or "denied"),
+            results,
+        });
+    }
 }
 
 /// <summary>
@@ -624,4 +783,34 @@ public class AddGroupMemberRequest
 {
     /// <summary>The user ID to add to the group.</summary>
     public Guid UserId { get; set; }
+}
+
+/// <summary>Request body for adding several users to a group in one step-up-gated call.</summary>
+public class AddGroupMembersBulkRequest
+{
+    /// <summary>The user IDs to add. Each is evaluated independently (duplicates are de-duped).</summary>
+    public List<Guid> UserIds { get; set; } = new();
+}
+
+/// <summary>Request body for removing several users from a group in one step-up-gated call.</summary>
+public class RemoveGroupMembersBulkRequest
+{
+    /// <summary>The user IDs to remove. Each is evaluated independently (duplicates are de-duped).</summary>
+    public List<Guid> UserIds { get; set; } = new();
+}
+
+/// <summary>Per-user outcome of a bulk member add.</summary>
+public class BulkMemberResult
+{
+    /// <summary>The user the result is for.</summary>
+    public Guid UserId { get; set; }
+
+    /// <summary>The user's username, when resolved.</summary>
+    public string? Username { get; set; }
+
+    /// <summary>One of: <c>added</c>, <c>ceremony</c>, <c>already_member</c>, <c>not_found</c>, <c>denied</c>.</summary>
+    public string Status { get; set; } = string.Empty;
+
+    /// <summary>The controlled-user ceremony id, when <see cref="Status"/> is <c>ceremony</c>.</summary>
+    public Guid? CeremonyId { get; set; }
 }

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { apiGet } from '../api/client';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { DataTable, DataTableColumn } from '../components/DataTable';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -11,12 +12,76 @@ function formatDate(d: string | null) {
 const TABS = ['General', 'EST', 'SCEP', 'CMP', 'ACME', 'Network'] as const;
 type Tab = typeof TABS[number];
 
+type Category = 'general' | 'protocol' | 'network';
+function tabCategory(tab: Tab): Category {
+    if (tab === 'General') return 'general';
+    if (tab === 'Network') return 'network';
+    return 'protocol';
+}
+
+const okFailBadge = (log: any) => <StatusBadge status={log.success ? 'active' : 'revoked'} label={log.success ? 'OK' : 'FAIL'} />;
+const networkBadge = (log: any) =>
+    log.blocked ? <StatusBadge status="revoked" label="BLOCKED" />
+        : log.statusCode >= 400 ? <StatusBadge status="expired" label={`${log.statusCode}`} />
+            : <StatusBadge status="active" label={`${log.statusCode ?? 'OK'}`} />;
+
+/// <summary>
+/// Builds the DataTable columns for the active audit tab. General (app), protocol (EST/SCEP/CMP/ACME)
+/// and network entries have distinct shapes, so each gets a tailored column set.
+/// </summary>
+function buildColumns(tab: Tab): DataTableColumn<any>[] {
+    const cat = tabCategory(tab);
+    const timeCol: DataTableColumn<any> = { key: 'time', header: 'Timestamp', defaultWidth: 170, minWidth: 140, exportValue: (l) => formatDate(l.timestamp), render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(l.timestamp)}</span> };
+
+    if (cat === 'network') {
+        return [
+            timeCol,
+            { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (l) => (l.blocked ? 'BLOCKED' : String(l.statusCode ?? '')), render: networkBadge },
+            { key: 'sourceIp', header: 'Source IP', defaultWidth: 130, exportValue: (l) => l.sourceIp || '', render: (l) => <span className={`font-mono text-xs ${l.blocked ? 'text-red-800 dark:text-red-300' : 'text-gray-700 dark:text-gray-300'}`}>{l.sourceIp}</span> },
+            { key: 'method', header: 'Method', defaultWidth: 90, exportValue: (l) => l.httpMethod || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 font-medium">{l.httpMethod}</span> },
+            { key: 'path', header: 'Request Path', defaultWidth: 220, flex: true, exportValue: (l) => l.requestPath || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.requestPath}</span> },
+            { key: 'protocol', header: 'Protocol', defaultWidth: 100, truncate: false, exportValue: (l) => l.protocol || '', render: (l) => l.protocol ? <StatusBadge status="pending" label={l.protocol} /> : <span className="text-xs text-gray-500">-</span> },
+            { key: 'caLabel', header: 'CA', defaultWidth: 120, exportValue: (l) => l.caLabel || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.caLabel || '-'}</span> },
+        ];
+    }
+
+    if (cat === 'protocol') {
+        return [
+            timeCol,
+            { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (l) => (l.success ? 'OK' : 'FAIL'), render: okFailBadge },
+            { key: 'operation', header: 'Operation', defaultWidth: 170, flex: true, exportValue: (l) => l.operation || l.messageType || '', render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300">{l.operation || l.messageType || '-'}</span> },
+            { key: 'subjectDN', header: 'Subject DN', defaultWidth: 220, exportValue: (l) => l.subjectDN || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.subjectDN || '-'}</span> },
+            { key: 'serial', header: 'Serial', defaultWidth: 140, exportValue: (l) => l.certificateSerial || '', render: (l) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{l.certificateSerial || '-'}</span> },
+            { key: 'caLabel', header: 'CA', defaultWidth: 120, exportValue: (l) => l.caLabel || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.caLabel || '-'}</span> },
+        ];
+    }
+
+    // general (app)
+    return [
+        timeCol,
+        { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (l) => (l.success ? 'OK' : 'FAIL'), render: okFailBadge },
+        { key: 'actor', header: 'Actor', defaultWidth: 150, exportValue: (l) => l.actorUsername || 'system', render: (l) => <span className="text-xs text-blue-800 dark:text-blue-300 truncate">{l.actorUsername || 'system'}</span> },
+        { key: 'action', header: 'Action', defaultWidth: 190, flex: true, exportValue: (l) => l.actionType || '', render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{l.actionType}</span> },
+        { key: 'target', header: 'Target', defaultWidth: 180, exportValue: (l) => `${l.targetEntityType || ''}${l.targetEntityId ? ` #${l.targetEntityId}` : ''}`, render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.targetEntityType} {l.targetEntityId ? `#${String(l.targetEntityId).substring(0, 8)}` : ''}</span> },
+        { key: 'sourceIp', header: 'Source IP', defaultWidth: 130, exportValue: (l) => l.sourceIp || '', render: (l) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400">{l.sourceIp || '-'}</span> },
+    ];
+}
+
+/* read-only drawer — dumps every populated field (DetailField hides null/empty) */
+const AuditDrawer: React.FC<{ log: any }> = ({ log }) => (
+    <div className="text-sm">
+        <DetailField label="Timestamp" value={formatDate(log.timestamp)} />
+        {Object.entries(log).filter(([k]) => k.toLowerCase() !== 'timestamp').map(([k, v]) => (
+            <DetailField key={k} label={k} value={v == null ? '' : (typeof v === 'object' ? JSON.stringify(v) : String(v))} mono={typeof v === 'object' || /id$|serial|hash|ip$/i.test(k)} />
+        ))}
+    </div>
+);
+
 const AuditLogs: React.FC = () => {
     const [activeTab, setActiveTab] = useState<Tab>('General');
     const [logs, setLogs] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedKey, setExpandedKey] = useState<string | null>(null);
     const [page, setPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
     const [dateFrom, setDateFrom] = useState('');
@@ -98,8 +163,9 @@ const AuditLogs: React.FC = () => {
     const handleTabChange = (tab: Tab) => {
         setActiveTab(tab);
         setPage(1);
-        setExpandedKey(null);
     };
+
+    const columns = buildColumns(activeTab);
 
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
@@ -182,138 +248,28 @@ const AuditLogs: React.FC = () => {
                 {(dateFrom || dateTo || filterCaId || filterActionType || filterUser) && (
                     <button
                         onClick={() => { setDateFrom(''); setDateTo(''); setFilterCaId(''); setFilterActionType(''); setFilterUser(''); setPage(1); }}
-                        className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white dark:text-white transition-colors"
+                        className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
                     >
                         Clear filters
                     </button>
                 )}
             </div>
 
-            {/* Log List */}
-            <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{activeTab} Audit Logs</h3>
-                </div>
-
-                <div>
-                    {loading && <div className="p-4 text-sm text-gray-600 dark:text-gray-400 text-center">Loading...</div>}
-                    {error && <div className="p-4 text-sm text-red-800 dark:text-red-400 text-center">{error}</div>}
-                    {!loading && !error && logs.length === 0 && (
-                        <div className="p-4 text-sm text-gray-600 text-center">No audit entries found</div>
-                    )}
-                    {!loading && !error && logs.map((log) => {
-                        const key = log.id || `${log.timestamp}-${log.actionType || log.operation}`;
-                        const expanded = expandedKey === key;
-                        const isProtocol = activeTab !== 'General' && activeTab !== 'Network';
-                        const isNetwork = activeTab === 'Network';
-
-                        return (
-                            <div key={key} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                                <button
-                                    onClick={() => setExpandedKey(expanded ? null : key)}
-                                    className="w-full px-4 py-3 flex items-center gap-2 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
-                                >
-                                    <span className="text-gray-600 text-xs">{expanded ? '▼' : '▶'}</span>
-                                    <span className="text-gray-600 text-xs min-w-[140px]">{formatDate(log.timestamp)}</span>
-                                    {isNetwork ? (
-                                        <>
-                                            {log.blocked ? (
-                                                <StatusBadge status="revoked" label="BLOCKED" />
-                                            ) : log.statusCode >= 400 ? (
-                                                <StatusBadge status="expired" label={`${log.statusCode}`} />
-                                            ) : (
-                                                <StatusBadge status="active" label={`${log.statusCode}`} />
-                                            )}
-                                            <span className={`${log.blocked ? 'text-red-800 dark:text-red-300' : 'text-gray-700 dark:text-gray-300'} text-xs font-mono`}>{log.sourceIp}</span>
-                                            <span className="text-gray-600 dark:text-gray-400 text-xs font-medium">{log.httpMethod}</span>
-                                            <span className="text-gray-600 dark:text-gray-400 text-xs truncate max-w-[200px]">{log.requestPath}</span>
-                                            {log.protocol && <StatusBadge status="pending" label={log.protocol} />}
-                                            {log.caLabel && <span className="text-cyan-400 text-xs">{log.caLabel}</span>}
-                                            {log.reason && <StatusBadge status="expired" label={log.reason} />}
-                                        </>
-                                    ) : (
-                                        <>
-                                            <StatusBadge status={log.success ? 'active' : 'revoked'} label={log.success ? 'OK' : 'FAIL'} />
-                                            {isProtocol ? (
-                                                <>
-                                                    <StatusBadge status="pending" label={activeTab} />
-                                                    <span className="text-purple-300 text-xs font-medium">{log.operation || log.messageType}</span>
-                                                    <span className="text-gray-600 dark:text-gray-400 text-xs truncate max-w-[250px]">{log.subjectDN || ''}</span>
-                                                    {log.certificateSerial && (
-                                                        <span className="ml-auto text-xs text-gray-600 font-mono">{log.certificateSerial}</span>
-                                                    )}
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <StatusBadge status="pending" label="App" />
-                                                    <span className="text-blue-800 dark:text-blue-300 text-xs">{log.actorUsername || 'system'}</span>
-                                                    <span className="text-gray-600 dark:text-gray-400 text-xs">{log.actionType}</span>
-                                                    <span className="ml-auto text-xs text-gray-600 truncate max-w-[200px]">
-                                                        {log.targetEntityType} {log.targetEntityId ? `#${log.targetEntityId.substring(0, 8)}` : ''}
-                                                    </span>
-                                                </>
-                                            )}
-                                        </>
-                                    )}
-                                </button>
-                                {expanded && (
-                                    <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50">
-                                        {isNetwork ? (
-                                            <>
-                                                <DetailField label="Timestamp" value={formatDate(log.timestamp)} />
-                                                <DetailField label="Source IP" value={log.sourceIp} />
-                                                <DetailField label="HTTP Method" value={log.httpMethod} />
-                                                <DetailField label="Request Path" value={log.requestPath} />
-                                                <DetailField label="Protocol" value={log.protocol} />
-                                                <DetailField label="CA Label" value={log.caLabel} />
-                                                <DetailField label="Reason" value={log.reason} />
-                                                <DetailField label="Status Code" value={log.statusCode?.toString()} />
-                                                <DetailField label="Blocked" value={log.blocked ? 'Yes' : 'No'} />
-                                                {log.responseTimeMs != null && <DetailField label="Response Time" value={`${log.responseTimeMs}ms`} />}
-                                                <DetailField label="User Agent" value={log.userAgent} />
-                                            </>
-                                        ) : isProtocol ? (
-                                            <>
-                                                <DetailField label="Protocol" value={activeTab} />
-                                                <DetailField label="Operation" value={log.operation || log.messageType} />
-                                                <DetailField label="Subject DN" value={log.subjectDN} />
-                                                <DetailField label="Certificate Serial" value={log.certificateSerial} mono />
-                                                <DetailField label="Key Algorithm" value={log.keyAlgorithm} />
-                                                <DetailField label="Key Size" value={log.keySize} />
-                                                <DetailField label="CA Label" value={log.caLabel} />
-                                                <DetailField label="Source IP" value={log.sourceIp} />
-                                                <DetailField label="Timestamp" value={formatDate(log.timestamp)} />
-                                                <DetailField label="Success" value={log.success ? 'Yes' : 'No'} />
-                                                <DetailField label="Error" value={log.errorMessage} />
-                                                {/* ACME-specific fields */}
-                                                {log.accountId && <DetailField label="Account ID" value={log.accountId} mono />}
-                                                {log.orderId && <DetailField label="Order ID" value={log.orderId} mono />}
-                                                {log.identifiers && <DetailField label="Identifiers" value={log.identifiers} />}
-                                                {log.revocationReason && <DetailField label="Revocation Reason" value={log.revocationReason} />}
-                                                {/* CMP-specific fields */}
-                                                {log.transactionId && <DetailField label="Transaction ID" value={log.transactionId} mono />}
-                                            </>
-                                        ) : (
-                                            <>
-                                                <DetailField label="Source" value="Application" />
-                                                <DetailField label="Action" value={log.actionType} />
-                                                <DetailField label="Actor" value={`${log.actorUsername || 'N/A'} (${log.actorUserId || 'N/A'})`} />
-                                                <DetailField label="Timestamp" value={formatDate(log.timestamp)} />
-                                                <DetailField label="Target Type" value={log.targetEntityType} />
-                                                <DetailField label="Target ID" value={log.targetEntityId} mono />
-                                                <DetailField label="Source IP" value={log.sourceIp} />
-                                                <DetailField label="Success" value={log.success ? 'Yes' : 'No'} />
-                                                <DetailField label="Error" value={log.errorMessage} />
-                                                <DetailField label="Details" value={log.detailsJson} />
-                                            </>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                </div>
-            </div>
+            <DataTable<any>
+                tableId={`audit-${activeTab.toLowerCase()}`}
+                title={`${activeTab} Audit Logs`}
+                rows={logs}
+                rowKey={(l) => l.id || `${l.timestamp}-${l.actionType || l.operation || l.messageType || ''}`}
+                loading={loading}
+                error={error}
+                empty="No audit entries found"
+                columns={columns}
+                selectable
+                exportFileName={`audit-${activeTab.toLowerCase()}`}
+                renderDrawer={(l) => <AuditDrawer log={l} />}
+                drawerTitle={(l) => l.actionType || l.operation || l.messageType || (l.requestPath ? `${l.httpMethod} ${l.requestPath}` : 'Audit entry')}
+                detailPath={(l) => `/audit/${activeTab.toLowerCase()}/${l.id}`}
+            />
 
             {/* Pagination */}
             {totalPages > 1 && (
@@ -321,7 +277,7 @@ const AuditLogs: React.FC = () => {
                     <button
                         onClick={() => setPage((p) => Math.max(1, p - 1))}
                         disabled={page <= 1}
-                        className="px-3 py-1 text-sm bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="px-3 py-1 text-sm bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                         Previous
                     </button>
@@ -329,7 +285,7 @@ const AuditLogs: React.FC = () => {
                     <button
                         onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                         disabled={page >= totalPages}
-                        className="px-3 py-1 text-sm bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="px-3 py-1 text-sm bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                         Next
                     </button>

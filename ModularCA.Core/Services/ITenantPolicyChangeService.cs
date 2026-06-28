@@ -40,12 +40,18 @@ public interface ITenantPolicyChangeService
     /// <param name="initiatorUserId">The user initiating the ceremony (for audit/approvals).</param>
     /// <param name="initiatorUsername">The initiator's username (for audit/approvals).</param>
     /// <returns>The created ceremony ID.</returns>
+    /// <param name="userQuorumIncluded">When true, the tenant's controlled-user approval quorum is changed to <paramref name="proposedUserQuorum"/> on execution.</param>
+    /// <param name="proposedUserQuorum">Proposed tenant user-approval quorum (null = inherit System). Only applied when <paramref name="userQuorumIncluded"/> is true.</param>
+    /// <param name="caUserQuorums">Per-CA user-approval quorum changes (CaId + ProposedQuorum); current values are snapshotted here for the drift guard.</param>
     Task<Guid> InitiateChangeAsync(
         Guid tenantId,
         bool? proposedRequireKeyCeremony,
         int? proposedCeremonyRequiredApprovals,
         Guid initiatorUserId,
-        string initiatorUsername);
+        string initiatorUsername,
+        bool userQuorumIncluded = false,
+        int? proposedUserQuorum = null,
+        IReadOnlyList<ModularCA.Shared.Models.CaUserQuorumChange>? caUserQuorums = null);
 
     /// <summary>
     /// Applies an approved policy-change ceremony to the tenant row. Re-validates that

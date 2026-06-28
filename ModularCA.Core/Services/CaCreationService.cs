@@ -455,6 +455,13 @@ public class CaCreationService(
             db.SigningProfiles.Add(signingProfile);
             await db.SaveChangesAsync();
 
+            // [CA-CREATE-DIAG] Capture certEntity.CertificateId and the signing profile's IssuerId at the
+            // moment the profile is written, so we can see whether certEntity.CertificateId later changes
+            // before it's assigned to the CA entity (which would explain IssuerId != CA.CertificateId).
+            logger.LogWarning(
+                "[CA-CREATE-DIAG] After signing-profile save for '{Name}': certEntity.CertificateId={CertId} signingProfile.Id={SpId} signingProfile.IssuerId={IssuerId}",
+                name, certEntity.CertificateId, signingProfile.Id, signingProfile.IssuerId);
+
             // Tenant-isolate the signing-profile-to-cert-profile link.
             // Now that CertProfileEntity.TenantId is a real column, only link profiles that
             // (a) are not CA profiles and (b) are either system-wide (TenantId == null) or
@@ -551,8 +558,9 @@ public class CaCreationService(
             // Create CRL schedule for this CA (initial CRL generated after registry registration below)
             await CreateCrlScheduleAsync(certEntity, newCaCert, generateInitial: false);
 
-            // Persist the per-CA public base URL; CDP/OCSP/AIA are auto-generated at cert-build time
-            await CreateServiceUrlsAsync(certEntity, publicBaseUrl);
+            // Persist the per-CA public base URL; CDP/OCSP/AIA are auto-generated at cert-build time.
+            // Intermediates inherit the parent CA's base URL when the operator didn't supply one.
+            await CreateServiceUrlsAsync(certEntity, publicBaseUrl, parentCertificateId);
 
             // Issue TSA signer and OCSP responder certs through the standard CSR pipeline.
             // Uses the CA-override issuance overload since the CA isn't in the keystore yet.
@@ -711,9 +719,6 @@ public class CaCreationService(
             registry.RegisterSigner(identity);
 
         // Generate the initial CRL now that the CA key is in the registry.
-        // On CRL-gen failure, unregister the signer so the registry doesn't hold
-        // a live entry for a CA whose first CRL never rendered. The DB + keystore state is
-        // already consistent — the operator can retry CRL generation later.
         try
         {
             await crlService.GenerateCrlAsync(certEntity.CertificateId);
@@ -721,12 +726,42 @@ public class CaCreationService(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Could not generate initial CRL for CA '{Name}' (will be generated on next scheduler run)", name);
-            if (keystore is MultiCARegistry registry2)
-                registry2.UnregisterSigner(newCaCert.SerialNumber);
+            // A failed INITIAL CRL is non-fatal: the CA is fully persisted, its key is registered,
+            // and the CRL scheduler will render one on its next run. We deliberately do NOT unregister
+            // the signer here. Unregistering removes a perfectly usable CA key from the runtime
+            // registry, which makes the brand-new CA immediately unusable as a signing parent
+            // ("Parent CA private key not found in keystore" when creating a sub-CA under it) until the
+            // app restarts and reloads the key from the keystore file. A missing first CRL is the far
+            // smaller problem and self-heals; an unusable CA does not.
+            logger.LogWarning(ex, "Could not generate initial CRL for CA '{Name}' (will be generated on next scheduler run; signer remains registered)", name);
         }
 
         logger.LogInformation("{Type} CA '{Name}' (label={Label}) created and registered at runtime", caType, name, caLabel);
+
+        // [CA-CREATE-DIAG] Temporary: prove whether the signing profile we just wrote is findable by the
+        // SAME predicate the intermediate-creation path uses (sp.IssuerId == parentCert.CertificateId).
+        // In memory IssuerId and caEntity.CertificateId are the identical GUID (see assignments above), so
+        // if this round-trip lookup against the DB returns FOUND=false, the two char(36) columns compare
+        // unequal despite identical text — i.e. a GUID-storage / collation mismatch — which is the systemic
+        // cause of "Parent CA signing profile not found". AsNoTracking forces a real DB round-trip rather
+        // than an identity-map hit. Remove once the cause is confirmed.
+        try
+        {
+            var roundTripProfileId = await db.SigningProfiles.AsNoTracking()
+                .Where(sp => sp.IssuerId == caEntity.CertificateId)
+                .Select(sp => (Guid?)sp.Id)
+                .FirstOrDefaultAsync();
+            logger.LogWarning(
+                "[CA-CREATE-DIAG] CA '{Name}': wrote signingProfile.Id={SpId} IssuerId={IssuerId}; caEntity.Id={CaId} CertificateId={CaCertId}. " +
+                "Round-trip lookup by (IssuerId == CertificateId) FOUND={Found} (matchedProfileId={Matched}).",
+                name, signingProfile.Id, signingProfile.IssuerId, caEntity.Id, caEntity.CertificateId,
+                roundTripProfileId != null, roundTripProfileId);
+        }
+        catch (Exception diagEx)
+        {
+            logger.LogWarning(diagEx, "[CA-CREATE-DIAG] round-trip signing-profile lookup threw for CA '{Name}'", name);
+        }
+
         return caEntity;
     }
 
@@ -888,19 +923,45 @@ public class CaCreationService(
     /// Persists the per-CA public base URL. CDP, OCSP, and AIA endpoints are always computed on
     /// the fly by <see cref="ICaServiceUrlService.ResolveForCaAsync"/> (<c>{base}/crl/{label}</c>,
     /// <c>{base}/ocsp</c>, <c>{base}/ca/{label}</c>), so the admin can swap the host later
-    /// without touching anything else. When <paramref name="publicBaseUrl"/> is not provided,
-    /// falls back to the default derived from <c>SystemConfig.Https.PublicDomain</c> and
-    /// <c>Http.PublicPort</c> so new CAs automatically get CDP/AIA extensions without the
-    /// operator having to repeat the domain on every creation.
+    /// without touching anything else. The base URL is resolved with the following precedence so
+    /// that a new CA never silently ends up with no service URLs (and therefore no CDP/AIA in the
+    /// certs it issues):
+    /// <list type="number">
+    ///   <item>the operator-supplied <paramref name="publicBaseUrl"/>, when present;</item>
+    ///   <item>for intermediates, the <b>parent CA's</b> public base URL (resolved via
+    ///         <paramref name="parentCertificateId"/>) — a child CA shares its parent's
+    ///         distribution host by default rather than appearing "lacking" next to its root;</item>
+    ///   <item>the default derived from <c>SystemConfig.Https.PublicDomain</c> + <c>Http.PublicPort</c>.</item>
+    /// </list>
+    /// Roots have no parent, so step 2 is skipped for them.
     /// </summary>
-    private async Task CreateServiceUrlsAsync(CertificateEntity caCertEntity, string? publicBaseUrl)
+    private async Task CreateServiceUrlsAsync(CertificateEntity caCertEntity, string? publicBaseUrl, Guid? parentCertificateId)
     {
         if (await db.CaServiceUrls.AnyAsync(s => s.CaCertificateId == caCertEntity.CertificateId))
             return;
 
-        var normalizedBase = string.IsNullOrWhiteSpace(publicBaseUrl)
-            ? DeriveDefaultPublicBaseUrl()
-            : publicBaseUrl.TrimEnd('/');
+        string? normalizedBase;
+        if (!string.IsNullOrWhiteSpace(publicBaseUrl))
+        {
+            normalizedBase = publicBaseUrl.TrimEnd('/');
+        }
+        else
+        {
+            // Intermediates inherit the parent CA's public base URL when the operator left it blank,
+            // so a child CA gets the same CDP/OCSP/AIA host as its root instead of no service URLs.
+            string? inherited = null;
+            if (parentCertificateId != null)
+            {
+                inherited = await db.CaServiceUrls
+                    .Where(s => s.CaCertificateId == parentCertificateId.Value)
+                    .Select(s => s.PublicBaseUrl)
+                    .FirstOrDefaultAsync();
+            }
+
+            normalizedBase = !string.IsNullOrWhiteSpace(inherited)
+                ? inherited.TrimEnd('/')
+                : DeriveDefaultPublicBaseUrl();
+        }
 
         db.CaServiceUrls.Add(new CaServiceUrlEntity
         {
@@ -979,7 +1040,9 @@ public class CaCreationService(
             await db.SaveChangesAsync();
         }
 
-        logger.LogInformation("{CertType} certificate issued for CA '{CaName}' via standard pipeline (CN={Subject})",
+        // {Subject} is the full Subject DN, which already begins with "CN=" — don't prefix another
+        // "CN=" here or the log reads "(CN=CN=... TSA)".
+        logger.LogInformation("{CertType} certificate issued for CA '{CaName}' via standard pipeline (subject={Subject})",
             certType, caEntity.Name, issuedCert.SubjectDN);
 
         var privKeyDer = PrivateKeyInfoFactory.CreatePrivateKeyInfo(keyPair.Private).GetDerEncoded();

@@ -122,7 +122,7 @@ namespace ModularCA.Auth.Services
         /// <see cref="RefreshTokenEntity.PlaintextTokenForClient"/> property) while the
         /// <see cref="RefreshTokenEntity.Token"/> field stores the SHA-256 hash.
         /// </summary>
-        public RefreshTokenEntity GenerateRefreshToken(Guid userId, string? ip, string? userAgentHash = null)
+        public RefreshTokenEntity GenerateRefreshToken(Guid userId, string? ip, string? userAgentHash = null, string? cnfJkt = null)
         {
             var plaintext = Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
             var entity = new RefreshTokenEntity
@@ -131,6 +131,7 @@ namespace ModularCA.Auth.Services
                 Token = HashRefreshToken(plaintext), // DB stores hash
                 CreatedByIp = ip,
                 UserAgentHash = userAgentHash,
+                CnfJkt = cnfJkt, // DPoP proof-of-possession binding (null = unbound / legacy)
                 FamilyId = Guid.NewGuid(),
                 FamilyCreatedAt = DateTime.UtcNow,
                 ExpiresAt = DateTime.UtcNow.AddDays(_config.Tokens.RefreshTokenDays)

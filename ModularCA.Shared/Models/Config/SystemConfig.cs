@@ -513,6 +513,15 @@ namespace ModularCA.Shared.Models.Config
         public bool AllowRefreshTokenMismatch { get; set; } = false;
 
         /// <summary>
+        /// Hard-enforce DPoP proof-of-possession on refresh: when a session was bound to a client key
+        /// (<c>RefreshTokenEntity.CnfJkt</c>), reject the refresh (401 <c>REFRESH_POP_INVALID</c>) unless
+        /// it carries a matching proof. Default <b>false</b> = observe mode: bind + audit-log mismatches
+        /// but allow the refresh (rebinding to the presented key), so the binding can be validated in
+        /// production before enforcement is switched on. The theft defense is only active once enforced.
+        /// </summary>
+        public bool EnforceRefreshTokenPoP { get; set; } = false;
+
+        /// <summary>
         /// Per-username rate-limit bucket floor. This is the maximum
         /// number of login/change-password failures allowed from any source for a single
         /// normalized username within the configured window. Complements per-IP limiting

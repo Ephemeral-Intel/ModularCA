@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import Chevron from '../components/Chevron';
 import { apiGet, apiPut, apiPutWithMfa } from '../api/client';
 import { useStepUp } from '../components/StepUpMfaContext';
 import { useToast } from '../context/ToastContext';
@@ -303,7 +304,7 @@ const ProtocolCard: React.FC<ProtocolCardProps> = ({
                 onClick={onToggleExpand}
                 className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-gray-200/50 dark:bg-gray-700/50 transition-colors"
             >
-                <span className="text-gray-600 text-xs">{expanded ? '\u25BC' : '\u25B6'}</span>
+                <span className="text-gray-600 text-xs"><Chevron open={expanded} className="w-3 h-3" /></span>
                 <span className="text-sm font-semibold text-gray-900 dark:text-white">{protocol}</span>
                 {config ? (
                     <StatusBadge

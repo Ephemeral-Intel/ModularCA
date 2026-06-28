@@ -16,6 +16,6 @@ namespace ModularCA.Auth.Interfaces
         /// Creates a cryptographically random refresh token for the specified user.
         /// Optionally stores a User-Agent hash for session fingerprint binding.
         /// </summary>
-        RefreshTokenEntity GenerateRefreshToken(Guid userId, string? ip, string? userAgentHash = null);
+        RefreshTokenEntity GenerateRefreshToken(Guid userId, string? ip, string? userAgentHash = null, string? cnfJkt = null);
     }
 }
