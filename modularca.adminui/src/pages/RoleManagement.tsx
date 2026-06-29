@@ -164,7 +164,7 @@ const RoleManagement: React.FC = () => {
 
     const columns: DataTableColumn<RoleSummary>[] = [
         { key: 'name', header: 'Name', defaultWidth: 220, minWidth: 140, truncate: false, exportValue: (r) => r.name, render: (r) => <span className="text-gray-900 dark:text-white font-medium truncate">{r.name}</span> },
-        { key: 'description', header: 'Description', defaultWidth: 280, flex: true, exportValue: (r) => r.description || '', render: (r) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{r.description || '-'}</span> },
+        { key: 'description', header: 'Description', defaultWidth: 280, exportValue: (r) => r.description || '', render: (r) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{r.description || '-'}</span> },
         { key: 'type', header: 'Type', defaultWidth: 110, truncate: false, exportValue: (r) => (r.isBuiltIn ? 'Built-in' : 'Custom'), render: (r) => <StatusBadge status={r.isBuiltIn ? 'pending' : 'active'} label={r.isBuiltIn ? 'Built-in' : 'Custom'} /> },
         { key: 'capabilities', header: 'Capabilities', defaultWidth: 120, exportValue: (r) => (r.capabilityCount ?? 0), render: (r) => <span className="text-xs text-gray-600 dark:text-gray-400">{r.capabilityCount ?? 0}</span> },
     ];

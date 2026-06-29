@@ -39,7 +39,7 @@ function buildColumns(tab: Tab): DataTableColumn<any>[] {
             { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (l) => (l.blocked ? 'BLOCKED' : String(l.statusCode ?? '')), render: networkBadge },
             { key: 'sourceIp', header: 'Source IP', defaultWidth: 130, exportValue: (l) => l.sourceIp || '', render: (l) => <span className={`font-mono text-xs ${l.blocked ? 'text-red-800 dark:text-red-300' : 'text-gray-700 dark:text-gray-300'}`}>{l.sourceIp}</span> },
             { key: 'method', header: 'Method', defaultWidth: 90, exportValue: (l) => l.httpMethod || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 font-medium">{l.httpMethod}</span> },
-            { key: 'path', header: 'Request Path', defaultWidth: 220, flex: true, exportValue: (l) => l.requestPath || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.requestPath}</span> },
+            { key: 'path', header: 'Request Path', defaultWidth: 220, exportValue: (l) => l.requestPath || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.requestPath}</span> },
             { key: 'protocol', header: 'Protocol', defaultWidth: 100, truncate: false, exportValue: (l) => l.protocol || '', render: (l) => l.protocol ? <StatusBadge status="pending" label={l.protocol} /> : <span className="text-xs text-gray-500">-</span> },
             { key: 'caLabel', header: 'CA', defaultWidth: 120, exportValue: (l) => l.caLabel || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.caLabel || '-'}</span> },
         ];
@@ -49,7 +49,7 @@ function buildColumns(tab: Tab): DataTableColumn<any>[] {
         return [
             timeCol,
             { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (l) => (l.success ? 'OK' : 'FAIL'), render: okFailBadge },
-            { key: 'operation', header: 'Operation', defaultWidth: 170, flex: true, exportValue: (l) => l.operation || l.messageType || '', render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300">{l.operation || l.messageType || '-'}</span> },
+            { key: 'operation', header: 'Operation', defaultWidth: 170, exportValue: (l) => l.operation || l.messageType || '', render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300">{l.operation || l.messageType || '-'}</span> },
             { key: 'subjectDN', header: 'Subject DN', defaultWidth: 220, exportValue: (l) => l.subjectDN || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.subjectDN || '-'}</span> },
             { key: 'serial', header: 'Serial', defaultWidth: 140, exportValue: (l) => l.certificateSerial || '', render: (l) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{l.certificateSerial || '-'}</span> },
             { key: 'caLabel', header: 'CA', defaultWidth: 120, exportValue: (l) => l.caLabel || '', render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.caLabel || '-'}</span> },
@@ -61,7 +61,7 @@ function buildColumns(tab: Tab): DataTableColumn<any>[] {
         timeCol,
         { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (l) => (l.success ? 'OK' : 'FAIL'), render: okFailBadge },
         { key: 'actor', header: 'Actor', defaultWidth: 150, exportValue: (l) => l.actorUsername || 'system', render: (l) => <span className="text-xs text-blue-800 dark:text-blue-300 truncate">{l.actorUsername || 'system'}</span> },
-        { key: 'action', header: 'Action', defaultWidth: 190, flex: true, exportValue: (l) => l.actionType || '', render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{l.actionType}</span> },
+        { key: 'action', header: 'Action', defaultWidth: 190, exportValue: (l) => l.actionType || '', render: (l) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{l.actionType}</span> },
         { key: 'target', header: 'Target', defaultWidth: 180, exportValue: (l) => `${l.targetEntityType || ''}${l.targetEntityId ? ` #${l.targetEntityId}` : ''}`, render: (l) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{l.targetEntityType} {l.targetEntityId ? `#${String(l.targetEntityId).substring(0, 8)}` : ''}</span> },
         { key: 'sourceIp', header: 'Source IP', defaultWidth: 130, exportValue: (l) => l.sourceIp || '', render: (l) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400">{l.sourceIp || '-'}</span> },
     ];

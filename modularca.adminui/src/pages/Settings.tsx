@@ -904,11 +904,11 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                         )}
                     </div>
 
-                    {/* Vulnerability Scan */}
+                    {/* Compliance Scan */}
                     <div className={cardClass}>
-                        <SectionHeader title="Vulnerability Scan" expanded={expanded === 'certVulnerabilityScan'} onToggle={() => toggle('certVulnerabilityScan')}
-                            description={config.certVulnerabilityScan?.enabled ? `Min RSA ${config.certVulnerabilityScan.minRsaKeySize || 2048}` : 'Disabled'} tag="live" />
-                        {expanded === 'certVulnerabilityScan' && (
+                        <SectionHeader title="Compliance Scan" expanded={expanded === 'complianceScan'} onToggle={() => toggle('complianceScan')}
+                            description={config.complianceScan?.enabled ? `Min RSA ${config.complianceScan.minRsaKeySize || 2048}` : 'Disabled'} tag="live" />
+                        {expanded === 'complianceScan' && (
                             <div className="p-4 border-t border-gray-300 dark:border-gray-700 space-y-4">
                                 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 rounded p-3 text-xs text-blue-800 dark:text-blue-300">
                                     These thresholds <strong>flag existing certificates</strong> in the inventory. Issuance is enforced
@@ -916,23 +916,23 @@ const ConfigTab: React.FC<{ tab: Tab }> = ({ tab }) => {
                                     Keep the two aligned to avoid surprises — the active policy baseline is shown beneath each field.
                                 </div>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <ConfigToggle label="Enabled" checked={config.certVulnerabilityScan?.enabled ?? false} onChange={(v) => update('certVulnerabilityScan', 'enabled', v)} />
+                                    <ConfigToggle label="Enabled" checked={config.complianceScan?.enabled ?? false} onChange={(v) => update('complianceScan', 'enabled', v)} />
                                     <div />
                                     <div>
-                                        <ConfigNumber label="Min RSA Key Size" value={config.certVulnerabilityScan?.minRsaKeySize} onChange={(v) => update('certVulnerabilityScan', 'minRsaKeySize', v)} fallback={0} />
+                                        <ConfigNumber label="Min RSA Key Size" value={config.complianceScan?.minRsaKeySize} onChange={(v) => update('complianceScan', 'minRsaKeySize', v)} fallback={0} />
                                         <p className="text-[10px] text-gray-600 mt-1">Policy: {config.certPolicy?.enabled ? `blocks issuance below ${config.certPolicy?.minRsaKeySize || 'unset'}` : 'enforcement off'}</p>
                                     </div>
                                     <div>
-                                        <ConfigNumber label="Warn Over Validity Days" value={config.certVulnerabilityScan?.warnOverValidityDays} onChange={(v) => update('certVulnerabilityScan', 'warnOverValidityDays', v)} fallback={0} />
+                                        <ConfigNumber label="Warn Over Validity Days" value={config.complianceScan?.warnOverValidityDays} onChange={(v) => update('complianceScan', 'warnOverValidityDays', v)} fallback={0} />
                                         <p className="text-[10px] text-gray-600 mt-1">Policy: {config.certPolicy?.enabled ? `caps validity at ${config.certPolicy?.maxValidityDays || 'unset'}d` : 'enforcement off'}</p>
                                     </div>
                                     <div className="md:col-span-2">
-                                        <ConfigInput label="Deprecated Algorithms (comma-separated)" value={listToStr(config.certVulnerabilityScan?.deprecatedAlgorithms)} onChange={(v) => update('certVulnerabilityScan', 'deprecatedAlgorithms', strToList(v))} placeholder="MD5, SHA1, RSA-1024" />
+                                        <ConfigInput label="Deprecated Algorithms (comma-separated)" value={listToStr(config.complianceScan?.deprecatedAlgorithms)} onChange={(v) => update('complianceScan', 'deprecatedAlgorithms', strToList(v))} placeholder="MD5, SHA1, RSA-1024" />
                                         <p className="text-[10px] text-gray-600 mt-1">Policy forbids at issuance: {listToStr(config.certPolicy?.forbiddenAlgorithms) || 'none'}</p>
                                     </div>
                                 </div>
                                 <ScheduleMovedNote />
-                                <SaveButton saving={saving === 'certVulnerabilityScan'} onClick={() => saveSection('vulnerability-scan', { ...config.certVulnerabilityScan, schedule: '' }, 'certVulnerabilityScan')} />
+                                <SaveButton saving={saving === 'complianceScan'} onClick={() => saveSection('compliance-scan', { ...config.complianceScan, schedule: '' }, 'complianceScan')} />
                             </div>
                         )}
                     </div>

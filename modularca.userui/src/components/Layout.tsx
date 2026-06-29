@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { apiLogout } from '../api/client';
 import { useTheme } from '../context/ThemeContext';
+import Chevron from './Chevron';
 
 interface NavSection {
     title: string;
@@ -33,12 +34,6 @@ const navSections: NavSection[] = [
         title: 'CA Information',
         items: [
             { name: 'Trusted CAs', path: '/authorities', icon: '\u26BF' },
-        ]
-    },
-    {
-        title: 'My Account',
-        items: [
-            { name: 'My Security', path: '/security', icon: '\u2616' },
         ]
     },
 ];
@@ -85,7 +80,7 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
                             className="w-full px-3 py-1.5 text-xs font-semibold text-gray-600 uppercase tracking-wider hover:text-gray-700 dark:text-gray-300 flex justify-between items-center"
                         >
                             {section.title}
-                            <span className="text-[10px]">{collapsed[section.title] ? '\u25B6' : '\u25BC'}</span>
+                            <Chevron open={!collapsed[section.title]} className="w-2.5 h-2.5" />
                         </button>
 
                         {!collapsed[section.title] && (
@@ -114,13 +109,32 @@ const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
                 ))}
             </div>
 
-            <div className="p-3 border-t border-gray-200 dark:border-gray-800 flex-shrink-0">
+            <div className="p-3 border-t border-gray-200 dark:border-gray-800 flex-shrink-0 flex items-center gap-2">
                 <button
                     onClick={apiLogout}
-                    className="w-full px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors text-left"
+                    className="flex-1 px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors flex items-center gap-2"
                 >
+                    {/* Logout glyph: open door frame with an arrow exiting to the right. */}
+                    <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
+                    </svg>
                     Logout
                 </button>
+                <Link
+                    to="/account"
+                    title="My Account"
+                    aria-label="My Account"
+                    className={`px-3 py-2 rounded transition-colors ${
+                        location.pathname === '/account'
+                            ? 'bg-blue-600/20 text-blue-800 dark:text-blue-300'
+                            : 'text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                    }`}
+                >
+                    {/* Account glyph: head + shoulders, matching the logout icon's size/weight. */}
+                    <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.5 20.118a7.5 7.5 0 0 1 15 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.5-1.632Z" />
+                    </svg>
+                </Link>
             </div>
         </nav>
     );

@@ -18,9 +18,13 @@ import {
 const NON_TOGGLEABLE_JOBS = new Set<string>(['AcmeCleanup', 'TlsRenewal']);
 const CRON_5_FIELD = /^\s*\S+\s+\S+\s+\S+\s+\S+\s+\S+\s*$/;
 
+// Scheduler timestamps arrive as UTC instants without a trailing 'Z' (EF/NCrontab emit
+// DateTimeKind.Unspecified). Append 'Z' so they aren't misread as local, then render in the
+// viewer's local zone.
 function formatDate(d: string | null) {
     if (!d) return '-';
-    return new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(d);
+    return new Date(hasTz ? d : `${d}Z`).toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function jobResultBadge(result: SchedulerJob['lastResult']): React.ReactElement {

@@ -3,6 +3,7 @@ import { apiGet, API_BASE } from '../api/client';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { DataTable, type DataTableColumn } from '../components/DataTable';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -54,7 +55,6 @@ const MySshCertificates: React.FC = () => {
     const [certificates, setCertificates] = useState<SshCertificate[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedId, setExpandedId] = useState<string | null>(null);
     const [endpointUnavailable, setEndpointUnavailable] = useState(false);
 
     useEffect(() => {
@@ -89,81 +89,83 @@ const MySshCertificates: React.FC = () => {
         }
     };
 
+    const columns: DataTableColumn<SshCertificate>[] = [
+        {
+            key: 'status', header: 'Status', defaultWidth: 110, truncate: false,
+            exportValue: (c) => sshCertStatus(c),
+            render: (c) => {
+                const s = sshCertStatus(c);
+                return <StatusBadge status={statusBadgeType(s)} label={s.charAt(0).toUpperCase() + s.slice(1)} />;
+            },
+        },
+        {
+            key: 'keyId', header: 'Key ID', defaultWidth: 220,
+            exportValue: (c) => c.keyId || c.id,
+            render: (c) => <span className="text-sm text-gray-900 dark:text-white truncate">{c.keyId || c.id}</span>,
+        },
+        {
+            key: 'principals', header: 'Principals', defaultWidth: 180,
+            exportValue: (c) => formatPrincipals(c.principals),
+            render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{formatPrincipals(c.principals)}</span>,
+        },
+        {
+            key: 'validBefore', header: 'Valid Until', defaultWidth: 200, truncate: false,
+            exportValue: (c) => formatDate(c.validBefore),
+            render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400 whitespace-nowrap">{formatDate(c.validBefore)}</span>,
+        },
+    ];
+
+    const renderExpanded = (cert: SshCertificate) => {
+        const status = sshCertStatus(cert);
+        return (
+            <div className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <DetailField label="Key ID" value={cert.keyId} />
+                    <DetailField label="Serial Number" value={cert.serialNumber} mono />
+                    <DetailField label="Principals" value={formatPrincipals(cert.principals)} />
+                    <DetailField label="Valid After" value={formatDate(cert.validAfter)} />
+                    <DetailField label="Valid Before" value={formatDate(cert.validBefore)} />
+                </div>
+
+                {status === 'revoked' && (
+                    <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded p-2">
+                        <span className="text-xs text-red-800 dark:text-red-400">This certificate has been revoked.</span>
+                    </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-300 dark:border-gray-700">
+                    <button
+                        onClick={() => handleDownload(cert)}
+                        className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                    >
+                        Download Certificate
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">SSH Certificates</h1>
 
-            {loading && <p className="text-sm text-gray-600 dark:text-gray-400">Loading...</p>}
-            {error && <p className="text-sm text-red-800 dark:text-red-400">{error}</p>}
-
-            {endpointUnavailable && (
+            {endpointUnavailable ? (
                 <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-8 text-center">
                     <p className="text-gray-600">SSH certificates will appear here once issued.</p>
                 </div>
-            )}
-
-            {!loading && !error && !endpointUnavailable && certificates.length === 0 && (
-                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-8 text-center">
-                    <p className="text-gray-600">No SSH certificates found.</p>
-                    <p className="text-gray-600 text-sm mt-1">SSH certificates will appear here once issued.</p>
-                </div>
-            )}
-
-            {!loading && !error && !endpointUnavailable && certificates.length > 0 && (
-                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                    {certificates.map((cert) => {
-                        const status = sshCertStatus(cert);
-                        const expanded = expandedId === cert.id;
-
-                        return (
-                            <div key={cert.id} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                                <button
-                                    onClick={() => setExpandedId(expanded ? null : cert.id)}
-                                    className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-gray-200/50 dark:hover:bg-gray-700/50 transition-colors"
-                                >
-                                    <span className="text-gray-600 text-xs">{expanded ? '\u25BC' : '\u25B6'}</span>
-                                    <StatusBadge
-                                        status={statusBadgeType(status)}
-                                        label={status.charAt(0).toUpperCase() + status.slice(1)}
-                                    />
-                                    <span className="text-sm text-gray-900 dark:text-white truncate flex-1">
-                                        {cert.keyId || cert.id}
-                                    </span>
-                                    <span className="text-xs text-gray-600 flex-shrink-0">
-                                        Valid until: {formatDate(cert.validBefore)}
-                                    </span>
-                                </button>
-
-                                {expanded && (
-                                    <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50 space-y-3">
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                                            <DetailField label="Key ID" value={cert.keyId} />
-                                            <DetailField label="Serial Number" value={cert.serialNumber} mono />
-                                            <DetailField label="Principals" value={formatPrincipals(cert.principals)} />
-                                            <DetailField label="Valid After" value={formatDate(cert.validAfter)} />
-                                            <DetailField label="Valid Before" value={formatDate(cert.validBefore)} />
-                                        </div>
-
-                                        {status === 'revoked' && (
-                                            <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded p-2">
-                                                <span className="text-xs text-red-800 dark:text-red-400">This certificate has been revoked.</span>
-                                            </div>
-                                        )}
-
-                                        <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-300 dark:border-gray-700">
-                                            <button
-                                                onClick={() => handleDownload(cert)}
-                                                className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-                                            >
-                                                Download Certificate
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                </div>
+            ) : (
+                <DataTable<SshCertificate>
+                    tableId="my-ssh-certificates"
+                    title="SSH Certificates"
+                    rows={certificates}
+                    rowKey={(c) => c.id}
+                    loading={loading}
+                    error={error}
+                    empty="No SSH certificates found. They will appear here once issued."
+                    columns={columns}
+                    exportFileName="my-ssh-certificates"
+                    renderExpanded={renderExpanded}
+                />
             )}
         </div>
     );

@@ -28,6 +28,7 @@ public class UserCertificateController(
     ICurrentUserService currentUser,
     ICertificateAccessEvaluator certificateAccessEvaluator,
     ICertificateExportService exportService,
+    ICertificateRevocationService revocationService,
     ModularCADbContext dbContext,
     IAuditService auditService,
     IDistributedCache cache
@@ -37,9 +38,27 @@ public class UserCertificateController(
     private readonly ICurrentUserService _currentUser = currentUser;
     private readonly ICertificateAccessEvaluator _certificateAccessEvaluator = certificateAccessEvaluator;
     private readonly ICertificateExportService _exportService = exportService;
+    private readonly ICertificateRevocationService _revocationService = revocationService;
     private readonly ModularCADbContext _dbContext = dbContext;
     private readonly IAuditService _audit = auditService;
     private readonly IDistributedCache _cache = cache;
+
+    /// <summary>
+    /// Revocation reasons a user is permitted to select when self-revoking an owned
+    /// end-entity certificate. CA-level reasons (<see cref="RevocationReason.CACompromise"/>,
+    /// <see cref="RevocationReason.AaCompromise"/>) and the administrative hold state
+    /// (<see cref="RevocationReason.CertificateHold"/>) are intentionally excluded — those are
+    /// operator decisions, not subscriber-initiated ones.
+    /// </summary>
+    private static readonly HashSet<RevocationReason> SelfRevokeAllowedReasons =
+    [
+        RevocationReason.Unspecified,
+        RevocationReason.KeyCompromise,
+        RevocationReason.AffiliationChanged,
+        RevocationReason.Superseded,
+        RevocationReason.CessationOfOperation,
+        RevocationReason.PrivilegeWithdrawn,
+    ];
 
     /// <summary>
     /// Lists certificates the authenticated user has access to, filtered by tenant scope and access control, with pagination.
@@ -314,8 +333,10 @@ public class UserCertificateController(
         if (certInfo == null)
             return NotFound(new { error = "Certificate not found." });
 
-        // Verify the user has access to this certificate
-        if (!_certificateAccessEvaluator.CanViewCertificate(_currentUser.User.Id, certInfo.CertificateId))
+        // Require Manage-level access — renewal creates a new request that carries forward the
+        // original CSR / encrypted private-key references, so it is an ownership-level action and
+        // must not be available to view-only grantees. Mirrors the export/revoke access checks.
+        if (!_certificateAccessEvaluator.CanManageCertificate(_currentUser.User.Id, certInfo.CertificateId))
             return NotFound(new { error = "Certificate not found." });
 
         // Verify the certificate is not revoked
@@ -379,6 +400,74 @@ public class UserCertificateController(
         return Ok(new { requestId = renewalRequest.Id, message = "Renewal request submitted" });
     }
 
+    /// <summary>
+    /// Revokes an end-entity certificate the authenticated user owns (Manage-level access).
+    /// Requires step-up MFA. The revocation is permanent and triggers a best-effort CRL
+    /// regeneration. CA certificates, the System signing cert, and CA-level revocation reasons
+    /// are not permitted through this self-service path.
+    /// </summary>
+    /// <param name="serial">The serial number of the certificate to revoke.</param>
+    /// <param name="request">Revocation request containing the reason and optional invalidity date.</param>
+    /// <param name="mfaToken">Step-up MFA token from the X-MFA-Token header.</param>
+    /// <returns>The revocation result, or an error if the certificate is not found or not revocable by this user.</returns>
+    [HttpPost("{serial}/revoke")]
+    public async Task<IActionResult> RevokeOwnCertificate(string serial, [FromBody] UserCertRevokeRequest request,
+        [FromHeader(Name = "X-MFA-Token")] string? mfaToken = null)
+    {
+        await _currentUser.EnsureLoadedAsync();
+        if (!_currentUser.IsAuthenticated || _currentUser.User == null)
+            return Unauthorized();
+
+        if (!await MfaStepUpController.ValidateStepUpTokenAsync(_cache, User, mfaToken, StepUpOps.RevokeSelfCert, serial))
+            return StatusCode(403, new { error = "MFA re-verification required. Call /api/v1/auth/mfa/verify-stepup first.", requiresStepUp = true });
+
+        if (!SelfRevokeAllowedReasons.Contains(request.Reason))
+            return BadRequest(new { error = "The selected revocation reason is not permitted for self-service revocation." });
+
+        var cert = await _certStore.GetCertificateInfoAsync(serial);
+        if (cert == null)
+            return NotFound();
+
+        // Hide CA certs and System cert — these are never self-revocable.
+        if (cert.IsCA || cert.SubjectDN?.Contains("System Signing CA") == true)
+            return NotFound();
+
+        // Require Manage-level access since revocation is a destructive, ownership-level action.
+        if (!_certificateAccessEvaluator.CanManageCertificate(_currentUser.User.Id, cert.CertificateId))
+            return NotFound();
+
+        if (cert.Revoked)
+            return BadRequest(new { error = "Certificate is already revoked." });
+
+        RevocationResult result;
+        try
+        {
+            result = await _revocationService.RevokeCertificateAsync(null, serial, request.Reason, request.InvalidityDate);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // e.g. concurrent revoke hit the service-level idempotency guard.
+            return BadRequest(new { error = ex.Message });
+        }
+
+        await _audit.LogAsync(
+            AuditActionType.CertificateRevoked,
+            _currentUser.User.Id,
+            _currentUser.User.Username,
+            "Certificate", serial,
+            new { Reason = request.Reason.ToString(), SelfService = true, request.InvalidityDate },
+            HttpContext.Connection.RemoteIpAddress?.ToString());
+
+        return Ok(new
+        {
+            serialNumber = result.SerialNumber,
+            status = result.NewStatus,
+            reason = result.Reason?.ToString(),
+            revocationDate = result.EffectiveAt,
+            crlNumber = result.CrlNumber
+        });
+    }
+
 }
 
 /// <summary>
@@ -390,5 +479,23 @@ public class UserCertExportRequest
     /// The password used to protect the exported PFX file. Must not be empty.
     /// </summary>
     public string Password { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Request model for user self-service certificate revocation.
+/// </summary>
+public class UserCertRevokeRequest
+{
+    /// <summary>
+    /// The reason for revocation. Restricted to subscriber-permissible reasons; CA-level
+    /// reasons and the administrative hold state are rejected server-side.
+    /// </summary>
+    public RevocationReason Reason { get; set; } = RevocationReason.Unspecified;
+
+    /// <summary>
+    /// Optional RFC 5280 §5.3.2 invalidity date — when the compromise is believed to have
+    /// actually occurred. May precede the revocation date.
+    /// </summary>
+    public DateTime? InvalidityDate { get; set; }
 }
 

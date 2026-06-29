@@ -161,8 +161,8 @@ public class ModularCADbContext : DbContext
     // mTLS client certificate credentials for MFA
     public DbSet<MtlsCredentialEntity> MtlsCredentials { get; set; }
 
-    // Certificate vulnerability scan findings
-    public DbSet<CertVulnerabilityEntity> CertVulnerabilities { get; set; }
+    // Certificate compliance scan findings
+    public DbSet<CertComplianceFindingEntity> CertComplianceFindings { get; set; }
 
     // Key ceremony workflows for catastrophic CA operations
     public DbSet<KeyCeremonyEntity> KeyCeremonies { get; set; }
@@ -732,8 +732,8 @@ public class ModularCADbContext : DbContext
                   .OnDelete(DeleteBehavior.SetNull);
         });
 
-        // Certificate Vulnerability findings
-        modelBuilder.Entity<CertVulnerabilityEntity>(entity =>
+        // Certificate compliance findings
+        modelBuilder.Entity<CertComplianceFindingEntity>(entity =>
         {
             entity.HasIndex(e => e.CertificateId);
             entity.HasIndex(e => e.IsResolved);

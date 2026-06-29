@@ -482,7 +482,7 @@ Scheduler:
   ConsecutiveFailureAlertThreshold: 3
   JobTimeouts:
     LdapGroupSync: 120
-    CertVulnerabilityScan: 600
+    Compliance: 600
     AutoRenewal: 300
     BackupVerification: 120
     AuditRetention: 600
@@ -498,7 +498,7 @@ Audit:
     Schedule: "0 3 * * *"       # Daily 03:00 UTC
 CertExpiryNotification:
   Schedule: "0 6 * * *"         # Daily 06:00 UTC
-CertVulnerabilityScan:
+ComplianceScan:
   Schedule: "0 3 * * *"         # Daily 03:00 UTC
 CertPolicy:
   ExpireCheckSchedule: "0 1 * * *"  # CertExpireJob — auto-revoke past NotAfter
@@ -532,7 +532,7 @@ Backup:
                             <td className="py-2">Emails subscribers when a cert is within a warning-day threshold</td>
                         </tr>
                         <tr className="border-b border-gray-100 dark:border-gray-800">
-                            <td className="py-2 pr-4 font-mono text-sm">CertVulnerabilityScan</td>
+                            <td className="py-2 pr-4 font-mono text-sm">Compliance</td>
                             <td className="py-2 pr-4 font-mono text-sm">0 3 * * *</td>
                             <td className="py-2">Flags weak keys, deprecated sigalgs, missing SANs, over-long validity</td>
                         </tr>

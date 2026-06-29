@@ -168,7 +168,7 @@ const TenantsAndQuotas: React.FC = () => {
     const columns: DataTableColumn<Tenant>[] = [
         { key: 'status', header: 'Status', defaultWidth: 110, truncate: false, exportValue: (t) => (t.isEnabled !== false ? 'Enabled' : 'Disabled'), render: (t) => <StatusBadge status={t.isEnabled !== false ? 'active' : 'disabled'} label={t.isEnabled !== false ? 'Enabled' : 'Disabled'} /> },
         {
-            key: 'name', header: 'Name', defaultWidth: 240, minWidth: 140, flex: true, truncate: false,
+            key: 'name', header: 'Name', defaultWidth: 240, minWidth: 140, truncate: false,
             exportValue: (t) => t.name + (t.isSystemTenant ? ' (system)' : ''),
             render: (t) => (
                 <span className="text-gray-900 dark:text-white font-medium truncate">

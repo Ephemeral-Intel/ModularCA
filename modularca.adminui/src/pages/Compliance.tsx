@@ -199,14 +199,14 @@ const Compliance: React.FC = () => {
         setVulnError(null);
         try {
             const [vulnsResp, sum] = await Promise.all([
-                apiGet<{ items?: Vulnerability[] } | Vulnerability[]>('/api/v1/admin/vulnerabilities?includeResolved=true'),
-                apiGet<VulnerabilitySummary>('/api/v1/admin/vulnerabilities/summary'),
+                apiGet<{ items?: Vulnerability[] } | Vulnerability[]>('/api/v1/admin/compliance?includeResolved=true'),
+                apiGet<VulnerabilitySummary>('/api/v1/admin/compliance/summary'),
             ]);
             const items = Array.isArray(vulnsResp) ? vulnsResp : (vulnsResp?.items ?? []);
             setVulnerabilities(items);
             setVulnSummary(sum);
         } catch (e: any) {
-            setVulnError(e.message || 'Failed to load vulnerabilities');
+            setVulnError(e.message || 'Failed to load findings');
         } finally {
             setVulnLoading(false);
         }
@@ -220,10 +220,10 @@ const Compliance: React.FC = () => {
     const handleResolve = async (id: string) => {
         setResolvingIds(prev => new Set(prev).add(id));
         try {
-            await apiPost(`/api/v1/admin/vulnerabilities/${id}/resolve`);
+            await apiPost(`/api/v1/admin/compliance/${id}/resolve`);
             await loadVulnerabilities();
         } catch (e: any) {
-            showToast('error', e.message || 'Failed to resolve vulnerability');
+            showToast('error', e.message || 'Failed to resolve finding');
         } finally {
             setResolvingIds(prev => {
                 const next = new Set(prev);
@@ -288,7 +288,7 @@ const Compliance: React.FC = () => {
                 <div>
                     <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Compliance</h1>
                     <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                        Live certificate posture — inventory, algorithms, vulnerabilities, and expiry. Export a point-in-time report below.
+                        Live certificate posture — inventory, algorithms, findings, and expiry. Export a point-in-time report below.
                     </p>
                 </div>
             </div>
@@ -407,9 +407,9 @@ const Compliance: React.FC = () => {
                 )}
             </Section>
 
-            {/* Vulnerabilities — live interactive findings */}
+            {/* Compliance findings — live interactive */}
             <div className="space-y-3">
-                <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Vulnerabilities</h2>
+                <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Findings</h2>
 
                 {vulnError && (
                     <div className="bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 rounded-lg p-4 text-red-800 dark:text-red-300">{vulnError}</div>
@@ -459,38 +459,37 @@ const Compliance: React.FC = () => {
                 </div>
 
                 {/* Findings table */}
-                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                    <div className="px-4 py-3 border-b border-gray-300 dark:border-gray-700">
-                        <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
-                            Findings ({filteredVulns.length})
-                        </h3>
+                <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
+                    <div className="px-4 py-2.5 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Findings</h3>
+                        <span className="text-xs text-gray-500 dark:text-gray-500">{filteredVulns.length} {filteredVulns.length === 1 ? 'finding' : 'findings'}</span>
                     </div>
 
-                    <div className="overflow-x-auto">
-                        <table className="w-full min-w-[600px] text-xs">
-                            <thead>
-                                <tr className="text-gray-600 dark:text-gray-400 border-b border-gray-300 dark:border-gray-700">
-                                    <th className="text-left py-2 px-3 font-semibold w-8"></th>
-                                    <th className="text-left py-2 px-3 font-semibold">Severity</th>
-                                    <th className="text-left py-2 px-3 font-semibold">Type</th>
-                                    <th className="text-left py-2 px-3 font-semibold">Description</th>
-                                    <th className="text-left py-2 px-3 font-semibold">Certificate</th>
-                                    <th className="text-left py-2 px-3 font-semibold">Detected</th>
-                                    <th className="text-right py-2 px-3 font-semibold">Actions</th>
+                    <div className="overflow-auto max-h-[28rem]">
+                        <table className="w-full min-w-[680px] text-xs border-collapse">
+                            <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-gray-900/95 backdrop-blur text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-500">
+                                <tr className="border-b border-gray-200 dark:border-gray-800">
+                                    <th className="py-2 px-3 w-8" aria-label="Expand" />
+                                    <th className="text-left py-2 px-3 font-medium w-[88px]">Severity</th>
+                                    <th className="text-left py-2 px-3 font-medium w-[150px]">Type</th>
+                                    <th className="text-left py-2 px-3 font-medium">Description</th>
+                                    <th className="text-left py-2 px-3 font-medium w-[140px]">Certificate</th>
+                                    <th className="text-left py-2 px-3 font-medium w-[150px]">Detected</th>
+                                    <th className="text-right py-2 px-3 font-medium w-[96px]">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {vulnLoading && (
                                     <tr>
-                                        <td colSpan={7} className="py-6 text-center text-gray-600">
-                                            Loading findings...
+                                        <td colSpan={7} className="py-8 text-center text-gray-500 dark:text-gray-500">
+                                            Loading findings…
                                         </td>
                                     </tr>
                                 )}
                                 {!vulnLoading && filteredVulns.length === 0 && (
                                     <tr>
-                                        <td colSpan={7} className="py-6 text-center text-gray-600">
-                                            No vulnerabilities found
+                                        <td colSpan={7} className="py-8 text-center text-gray-500 dark:text-gray-500">
+                                            No findings
                                         </td>
                                     </tr>
                                 )}
@@ -499,39 +498,41 @@ const Compliance: React.FC = () => {
                                     return (
                                         <React.Fragment key={v.id}>
                                             <tr
-                                                className={`border-b border-gray-300 dark:border-gray-700/50 hover:bg-gray-200/30 dark:bg-gray-700/30 transition-colors cursor-pointer ${v.resolved ? 'opacity-60' : ''}`}
+                                                className={`border-b border-gray-100 dark:border-gray-800/60 cursor-pointer transition-colors ${
+                                                    isExpanded ? 'bg-blue-50/60 dark:bg-blue-900/20' : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
+                                                } ${v.resolved ? 'opacity-60' : ''}`}
                                                 onClick={() => setExpandedId(isExpanded ? null : v.id)}
                                             >
-                                                <td className="py-2 px-3 text-gray-600">
+                                                <td className="py-1.5 px-3 text-gray-400 dark:text-gray-500">
                                                     <Chevron open={isExpanded} className="w-3 h-3" />
                                                 </td>
-                                                <td className="py-2 px-3">
-                                                    <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${severityColor(v.severity)}`}>
+                                                <td className="py-1.5 px-3">
+                                                    <span className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold ${severityColor(v.severity)}`}>
                                                         {v.severity}
                                                     </span>
                                                 </td>
-                                                <td className="py-2 px-3 text-gray-800 dark:text-gray-200">{v.type}</td>
-                                                <td className="py-2 px-3 text-gray-700 dark:text-gray-300 max-w-[300px] truncate" title={v.description}>
+                                                <td className="py-1.5 px-3 text-gray-800 dark:text-gray-200 whitespace-nowrap">{v.type}</td>
+                                                <td className="py-1.5 px-3 text-gray-600 dark:text-gray-400 max-w-[320px] truncate" title={v.description}>
                                                     {truncate(v.description, 80)}
                                                 </td>
-                                                <td className="py-2 px-3 font-mono text-gray-600 dark:text-gray-400 max-w-[120px] truncate" title={v.certificateSerial}>
-                                                    {v.certificateSerial ? v.certificateSerial.substring(0, 16) + '...' : '-'}
+                                                <td className="py-1.5 px-3 font-mono text-gray-500 dark:text-gray-500 max-w-[140px] truncate" title={v.certificateSerial}>
+                                                    {v.certificateSerial ? v.certificateSerial.substring(0, 16) + '…' : '—'}
                                                 </td>
-                                                <td className="py-2 px-3 text-gray-600 dark:text-gray-400 whitespace-nowrap">
+                                                <td className="py-1.5 px-3 text-gray-500 dark:text-gray-500 whitespace-nowrap">
                                                     {formatDateTime(v.detectedAt)}
                                                 </td>
-                                                <td className="py-2 px-3 text-right" onClick={(e) => e.stopPropagation()}>
+                                                <td className="py-1.5 px-3 text-right" onClick={(e) => e.stopPropagation()}>
                                                     {!v.resolved && (
                                                         <button
                                                             onClick={() => handleResolve(v.id)}
                                                             disabled={resolvingIds.has(v.id)}
-                                                            className="px-2 py-1 text-[10px] bg-green-50 dark:bg-green-900/50 text-green-800 dark:text-green-300 border border-green-300 dark:border-green-700 rounded hover:bg-green-900 transition-colors disabled:opacity-50"
+                                                            className="px-2 py-1 text-[10px] font-medium text-green-700 dark:text-green-300 bg-green-50 dark:bg-green-900/40 border border-green-200 dark:border-green-800 rounded hover:bg-green-100 dark:hover:bg-green-900/70 transition-colors disabled:opacity-50"
                                                         >
-                                                            {resolvingIds.has(v.id) ? 'Resolving...' : 'Resolve'}
+                                                            {resolvingIds.has(v.id) ? 'Resolving…' : 'Resolve'}
                                                         </button>
                                                     )}
                                                     {v.resolved && (
-                                                        <span className="text-[10px] text-green-500">Resolved</span>
+                                                        <span className="text-[10px] text-green-600 dark:text-green-400">✓ Resolved</span>
                                                     )}
                                                 </td>
                                             </tr>

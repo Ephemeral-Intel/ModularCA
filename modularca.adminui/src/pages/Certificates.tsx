@@ -211,9 +211,9 @@ const Certificates: React.FC = () => {
     const columns: DataTableColumn<any>[] = [
         { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (c) => certStatus(c), render: (c) => <StatusBadge status={certStatus(c)} /> },
         { key: 'serial', header: 'Serial', defaultWidth: 180, exportValue: (c) => c.serialNumber, render: (c) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{c.serialNumber}</span> },
-        { key: 'subject', header: 'Subject', defaultWidth: 280, minWidth: 160, flex: true, exportValue: (c) => c.subjectDN, render: (c) => <span className="text-sm text-gray-900 dark:text-white truncate">{c.subjectDN}</span> },
+        { key: 'subject', header: 'Subject', defaultWidth: 280, minWidth: 160, exportValue: (c) => c.subjectDN, render: (c) => <span className="text-sm text-gray-900 dark:text-white truncate">{c.subjectDN}</span> },
         { key: 'keyAlg', header: 'Key Alg', defaultWidth: 110, exportValue: (c) => c.keyAlgorithm || '', render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{c.keyAlgorithm || '-'}</span> },
-        { key: 'expires', header: 'Expires', defaultWidth: 160, exportValue: (c) => formatDate(c.notAfter), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(c.notAfter)}</span> },
+        { key: 'expires', header: 'Expires', defaultWidth: 160, minWidth: 120, exportValue: (c) => formatDate(c.notAfter), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(c.notAfter)}</span> },
     ];
 
     const drawer = (c: any) => {

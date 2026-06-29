@@ -645,7 +645,7 @@ export default function AdminUiGuide() {
                     <li>Remediation recommendations</li>
                 </ul>
                 <div className="bg-gray-100 dark:bg-gray-800 rounded p-4 font-mono text-sm">
-                    GET /api/intel/vulnerabilities
+                    GET /api/v1/admin/compliance
                 </div>
             </section>
 

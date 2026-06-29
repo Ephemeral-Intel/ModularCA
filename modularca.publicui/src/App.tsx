@@ -9,6 +9,7 @@ import CrlDownload from './pages/CrlDownload';
 import AcmeDirectory from './pages/AcmeDirectory';
 import NotFound from './pages/NotFound';
 import ScrollToTop from './components/ScrollToTop';
+import TitleManager from './components/TitleManager';
 
 function App() {
     return (
@@ -17,6 +18,7 @@ function App() {
                 <ToastProvider>
                     <BrowserRouter basename="/public">
                         <ScrollToTop />
+                        <TitleManager />
                         <Routes>
                             <Route element={<Layout />}>
                                 <Route path="/" element={<Landing />} />

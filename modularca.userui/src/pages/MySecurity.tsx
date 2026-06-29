@@ -12,7 +12,7 @@ interface AllowedCa { caId: string; caName: string; caLabel: string; }
 
 const MAX_WEBAUTHN_KEYS = 3;
 
-const MySecurity: React.FC = () => {
+const MySecurity: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
     const navigate = useNavigate();
     const { requireStepUp } = useStepUp();
     const [mfa, setMfa] = useState<MfaStatus | null>(null);
@@ -256,11 +256,13 @@ const MySecurity: React.FC = () => {
     const canAddWebauthn = webauthnAvailable && webauthnCount < MAX_WEBAUTHN_KEYS;
 
     return (
-        <div className="p-6 max-w-3xl mx-auto space-y-6">
-            <div>
-                <h1 className="text-2xl font-bold text-gray-900 dark:text-white">My Security</h1>
-                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Manage your multi-factor authentication methods and account security.</p>
-            </div>
+        <div className={embedded ? 'space-y-6' : 'p-6 max-w-3xl mx-auto space-y-6'}>
+            {!embedded && (
+                <div>
+                    <h1 className="text-2xl font-bold text-gray-900 dark:text-white">My Security</h1>
+                    <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">Manage your multi-factor authentication methods and account security.</p>
+                </div>
+            )}
 
             {error && <div className="bg-red-50 dark:bg-red-900/50 border border-red-300 dark:border-red-700 text-red-800 dark:text-red-300 text-sm p-3 rounded">{error} <button onClick={() => setError(null)} className="ml-2 text-red-800 dark:text-red-400 underline">dismiss</button></div>}
             {actionMsg && <div className="bg-green-50 dark:bg-green-900/50 border border-green-300 dark:border-green-700 text-green-800 dark:text-green-300 text-sm p-3 rounded">{actionMsg}</div>}

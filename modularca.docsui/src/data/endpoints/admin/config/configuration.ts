@@ -194,14 +194,14 @@ export const adminConfiguration: ApiEndpoint[] = [
     },
     {
         method: 'PUT',
-        path: '/api/v1/admin/config/vulnerability-scan',
-        summary: 'Update the certificate vulnerability scan configuration (key size floor, max validity, schedule, deprecated algorithm list).',
+        path: '/api/v1/admin/config/compliance-scan',
+        summary: 'Update the certificate compliance scan configuration (key size floor, max validity, schedule, deprecated algorithm list).',
         auth: 'Authorize (SystemOperator)',
         category: 'Admin Configuration',
         headers: [
             { name: 'Authorization', type: 'Bearer token', required: true, description: 'JWT access token from /api/v1/auth/login' },
         ],
-        responseDescription: 'Update confirmation with the refreshed vulnerability scan config.',
+        responseDescription: 'Update confirmation with the refreshed compliance scan config.',
     },
     {
         method: 'PUT',

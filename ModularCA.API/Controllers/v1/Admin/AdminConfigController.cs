@@ -125,7 +125,7 @@ public class AdminConfigController(
             CertPolicy = _config.CertPolicy,
             Mtls = _config.Mtls,
             AutoRenewal = _config.AutoRenewal,
-            CertVulnerabilityScan = _config.CertVulnerabilityScan,
+            ComplianceScan = _config.ComplianceScan,
             CertExpiryNotification = _config.CertExpiryNotification,
             Acme = _config.Acme,
             Alert = _config.Alert,
@@ -512,20 +512,20 @@ public class AdminConfigController(
     }
 
     /// <summary>
-    /// Updates the certificate vulnerability scan configuration.
+    /// Updates the certificate compliance scan configuration.
     /// </summary>
-    [HttpPut("vulnerability-scan")]
-    public async Task<IActionResult> UpdateVulnerabilityScan([FromBody] VulnerabilityScanUpdateRequest request)
+    [HttpPut("compliance-scan")]
+    public async Task<IActionResult> UpdateComplianceScan([FromBody] ComplianceScanUpdateRequest request)
     {
-        _config.CertVulnerabilityScan.Enabled = request.Enabled;
-        if (request.MinRsaKeySize >= 2048) _config.CertVulnerabilityScan.MinRsaKeySize = request.MinRsaKeySize;
-        if (request.WarnOverValidityDays > 0) _config.CertVulnerabilityScan.WarnOverValidityDays = request.WarnOverValidityDays;
-        if (!string.IsNullOrEmpty(request.Schedule)) _config.CertVulnerabilityScan.Schedule = request.Schedule;
-        if (request.DeprecatedAlgorithms != null) _config.CertVulnerabilityScan.DeprecatedAlgorithms = request.DeprecatedAlgorithms;
-        if (request.ExpiringWithinDays > 0) _config.CertVulnerabilityScan.ExpiringWithinDays = request.ExpiringWithinDays;
+        _config.ComplianceScan.Enabled = request.Enabled;
+        if (request.MinRsaKeySize >= 2048) _config.ComplianceScan.MinRsaKeySize = request.MinRsaKeySize;
+        if (request.WarnOverValidityDays > 0) _config.ComplianceScan.WarnOverValidityDays = request.WarnOverValidityDays;
+        if (!string.IsNullOrEmpty(request.Schedule)) _config.ComplianceScan.Schedule = request.Schedule;
+        if (request.DeprecatedAlgorithms != null) _config.ComplianceScan.DeprecatedAlgorithms = request.DeprecatedAlgorithms;
+        if (request.ExpiringWithinDays > 0) _config.ComplianceScan.ExpiringWithinDays = request.ExpiringWithinDays;
         if (TryPersistOrError() is { } __persistErr) return __persistErr;
-        await AuditConfigChange("CertVulnerabilityScan", new { request.Enabled, request.MinRsaKeySize, request.WarnOverValidityDays, request.Schedule, request.ExpiringWithinDays });
-        return Ok(new { message = "Vulnerability scan config updated", config = _config.CertVulnerabilityScan });
+        await AuditConfigChange("ComplianceScan", new { request.Enabled, request.MinRsaKeySize, request.WarnOverValidityDays, request.Schedule, request.ExpiringWithinDays });
+        return Ok(new { message = "Compliance scan config updated", config = _config.ComplianceScan });
     }
 
     /// <summary>
@@ -717,8 +717,8 @@ public class AutoRenewalUpdateRequest
     public bool RequireKeyRotation { get; set; }
 }
 
-/// <summary>Request body for PUT /config/vulnerability-scan.</summary>
-public class VulnerabilityScanUpdateRequest
+/// <summary>Request body for PUT /config/compliance-scan.</summary>
+public class ComplianceScanUpdateRequest
 {
     public bool Enabled { get; set; }
     public int MinRsaKeySize { get; set; }

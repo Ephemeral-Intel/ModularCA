@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import ScrollToTop from './components/ScrollToTop';
+import TitleManager from './components/TitleManager';
 import ErrorBoundary from './components/ErrorBoundary';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { ToastProvider } from './context/ToastContext';
@@ -283,6 +284,7 @@ export default function App() {
                 <ToastProvider>
                     <BrowserRouter basename="/docs">
                         <ScrollToTop />
+                        <TitleManager />
                         <AppShell />
                     </BrowserRouter>
                 </ToastProvider>

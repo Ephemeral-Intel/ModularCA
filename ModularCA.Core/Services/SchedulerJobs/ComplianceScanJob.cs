@@ -22,7 +22,7 @@ namespace ModularCA.Core.Services.SchedulerJobs;
 /// findings for certificates that are no longer active are automatically resolved.
 ///
 /// Inherits <see cref="SingletonCronJob"/> so the base class owns past-due math against
-/// <c>CertVulnerabilityScan.Schedule</c>, missed-run policy, timeout enforcement,
+/// <c>ComplianceScan.Schedule</c>, missed-run policy, timeout enforcement,
 /// metrics, and <c>SchedulerJobStates</c> persistence — the body below is purely the
 /// per-tick scan work. The <c>RunAsync(ct)</c> entry point is retained as the
 /// operator-facing manual-run path: <c>SchedulerJobRegistry.RunNowAsync</c> calls it
@@ -30,28 +30,28 @@ namespace ModularCA.Core.Services.SchedulerJobs;
 /// the cron past-due gate that <see cref="SingletonCronJob.TickAsync"/> evaluates so the
 /// work fires immediately regardless of schedule.
 /// </summary>
-public class CertVulnerabilityScanJob : SingletonCronJob
+public class ComplianceScanJob : SingletonCronJob
 {
     private readonly ModularCADbContext _db;
     private readonly ISecurityAlertService _alerts;
     private readonly SystemConfig _config;
-    private readonly ILogger<CertVulnerabilityScanJob> _logger;
+    private readonly ILogger<ComplianceScanJob> _logger;
 
     /// <summary>
-    /// Initializes a new instance of the <see cref="CertVulnerabilityScanJob"/> class.
+    /// Initializes a new instance of the <see cref="ComplianceScanJob"/> class.
     /// </summary>
     /// <param name="serviceProvider">Root service provider used by the base class to scope per-tick dependencies.</param>
     /// <param name="db">Database context for querying certificates and storing findings.</param>
     /// <param name="alerts">Security alert service for raising critical-level alerts.</param>
-    /// <param name="config">System configuration containing vulnerability scan settings.</param>
+    /// <param name="config">System configuration containing compliance scan settings.</param>
     /// <param name="logger">Logger instance.</param>
     /// <param name="runner">Shared <see cref="SchedulerJobRunner"/> coordinator for singleton execution and metrics.</param>
-    public CertVulnerabilityScanJob(
+    public ComplianceScanJob(
         IServiceProvider serviceProvider,
         ModularCADbContext db,
         ISecurityAlertService alerts,
         SystemConfig config,
-        ILogger<CertVulnerabilityScanJob> logger,
+        ILogger<ComplianceScanJob> logger,
         SchedulerJobRunner runner)
         : base(serviceProvider, logger, config, runner)
     {
@@ -62,16 +62,16 @@ public class CertVulnerabilityScanJob : SingletonCronJob
     }
 
     /// <inheritdoc />
-    public override string Name => "CertVulnerabilityScan";
+    public override string Name => "Compliance";
 
     /// <summary>
-    /// Cron expression for the certificate vulnerability scan. Returns
+    /// Cron expression for the certificate compliance scan. Returns
     /// <see cref="string.Empty"/> when the scan is disabled, which the base
     /// <see cref="SingletonCronJob.TickAsync"/> treats as "skip without state write".
     /// </summary>
     protected override string CronExpression =>
-        _config.CertVulnerabilityScan.Enabled
-            ? _config.CertVulnerabilityScan.Schedule
+        _config.ComplianceScan.Enabled
+            ? _config.ComplianceScan.Schedule
             : string.Empty;
 
     /// <summary>
@@ -84,7 +84,7 @@ public class CertVulnerabilityScanJob : SingletonCronJob
     public Task RunAsync(CancellationToken cancellationToken) => ExecuteAsync(cancellationToken);
 
     /// <summary>
-    /// Executes the certificate vulnerability scan. Loads all active certificates,
+    /// Executes the certificate compliance scan. Loads all active certificates,
     /// parses each one via BouncyCastle, checks for known vulnerability patterns,
     /// and persists findings. Old findings for inactive certificates are auto-resolved.
     /// Critical findings trigger security alerts via <see cref="ISecurityAlertService"/>.
@@ -95,15 +95,15 @@ public class CertVulnerabilityScanJob : SingletonCronJob
         // CronExpression already short-circuits when the scan is disabled. The check
         // here is defense-in-depth for the manual-run RunAsync path which bypasses
         // the cron evaluation in the base class.
-        var scanConfig = _config.CertVulnerabilityScan;
+        var scanConfig = _config.ComplianceScan;
         if (!scanConfig.Enabled)
             return;
 
-        // Vulnerability scans sweep every active cert; on large installs
+        // Compliance scans sweep every active cert; on large installs
         // the initial materialisation can exceed the 30s default command timeout.
         _db.Database.SetCommandTimeout(TimeSpan.FromMinutes(5));
 
-        _logger.LogInformation("Starting certificate vulnerability scan");
+        _logger.LogInformation("Starting certificate compliance scan");
 
         var now = TimeProvider.GetUtcNow().UtcDateTime;
 
@@ -114,7 +114,7 @@ public class CertVulnerabilityScanJob : SingletonCronJob
             .ToListAsync(cancellationToken);
 
         // Load existing unresolved findings to avoid duplicates
-        var existingFindings = await _db.CertVulnerabilities
+        var existingFindings = await _db.CertComplianceFindings
             .Where(v => !v.IsResolved)
             .ToListAsync(cancellationToken);
 
@@ -153,7 +153,7 @@ public class CertVulnerabilityScanJob : SingletonCronJob
                     if (existingLookup.ContainsKey(key))
                         continue; // Already reported and unresolved — skip
 
-                    _db.CertVulnerabilities.Add(finding);
+                    _db.CertComplianceFindings.Add(finding);
                     newFindings++;
 
                     // Raise security alerts for critical findings
@@ -175,18 +175,18 @@ public class CertVulnerabilityScanJob : SingletonCronJob
         {
             await _db.SaveChangesAsync(cancellationToken);
             _logger.LogInformation(
-                "Certificate vulnerability scan complete: {NewFindings} new finding(s) across {Total} active certificate(s)",
+                "Certificate compliance scan complete: {NewFindings} new finding(s) across {Total} active certificate(s)",
                 newFindings, activeCerts.Count);
         }
         else
         {
             _logger.LogInformation(
-                "Certificate vulnerability scan complete: no new findings across {Total} active certificate(s)",
+                "Certificate compliance scan complete: no new findings across {Total} active certificate(s)",
                 activeCerts.Count);
         }
 
         // Update vulnerability gauge metrics by severity
-        var unresolvedFindings = await _db.CertVulnerabilities
+        var unresolvedFindings = await _db.CertComplianceFindings
             .Where(v => !v.IsResolved)
             .ToListAsync(cancellationToken);
         MetricsService.VulnerabilitiesActive.WithLabels("Critical").Set(
@@ -203,17 +203,17 @@ public class CertVulnerabilityScanJob : SingletonCronJob
     /// inspect key size, signature algorithm, extensions, and validity period.
     /// </summary>
     /// <param name="cert">The certificate entity to analyze.</param>
-    /// <param name="scanConfig">Vulnerability scan configuration thresholds.</param>
+    /// <param name="scanConfig">Compliance scan configuration thresholds.</param>
     /// <param name="now">Current UTC timestamp for validity calculations.</param>
     /// <param name="renewalSet">Set of certificate IDs that have pending renewal requests.</param>
     /// <returns>List of vulnerability findings for this certificate.</returns>
-    private List<CertVulnerabilityEntity> AnalyzeCertificate(
+    private List<CertComplianceFindingEntity> AnalyzeCertificate(
         CertificateEntity cert,
-        CertVulnerabilityScanConfig scanConfig,
+        ComplianceScanConfig scanConfig,
         DateTime now,
         HashSet<Guid> renewalSet)
     {
-        var findings = new List<CertVulnerabilityEntity>();
+        var findings = new List<CertComplianceFindingEntity>();
 
         X509Certificate? bcCert = null;
         if (cert.RawCertificate != null && cert.RawCertificate.Length > 0)
@@ -279,9 +279,9 @@ public class CertVulnerabilityScanJob : SingletonCronJob
         }
 
         // 5. Expiring without renewal — window is configurable via
-        // CertVulnerabilityScan.ExpiringWithinDays (default 30).
+        // ComplianceScan.ExpiringWithinDays (default 30).
         var daysToExpiry = (cert.NotAfter - now).TotalDays;
-        var expiringWindow = Math.Max(1, _config.CertVulnerabilityScan.ExpiringWithinDays);
+        var expiringWindow = Math.Max(1, _config.ComplianceScan.ExpiringWithinDays);
         if (daysToExpiry <= expiringWindow && daysToExpiry > 0 && !renewalSet.Contains(cert.CertificateId))
         {
             findings.Add(CreateFinding(cert.CertificateId, AlertSeverity.Warning, "ExpiringWithoutRenewal",
@@ -356,7 +356,7 @@ public class CertVulnerabilityScanJob : SingletonCronJob
     /// is no longer in the active set (revoked or expired).
     /// </summary>
     private async Task AutoResolveStaleFindings(
-        List<CertVulnerabilityEntity> existingFindings,
+        List<CertComplianceFindingEntity> existingFindings,
         HashSet<Guid> activeCertIds,
         DateTime now,
         CancellationToken cancellationToken)
@@ -372,7 +372,7 @@ public class CertVulnerabilityScanJob : SingletonCronJob
         {
             finding.IsResolved = true;
             finding.ResolvedAt = now;
-            _db.CertVulnerabilities.Update(finding);
+            _db.CertComplianceFindings.Update(finding);
         }
 
         await _db.SaveChangesAsync(cancellationToken);
@@ -385,7 +385,7 @@ public class CertVulnerabilityScanJob : SingletonCronJob
     /// <summary>
     /// Raises a critical security alert for a vulnerability finding via <see cref="ISecurityAlertService"/>.
     /// </summary>
-    private async Task RaiseCriticalAlert(CertificateEntity cert, CertVulnerabilityEntity finding)
+    private async Task RaiseCriticalAlert(CertificateEntity cert, CertComplianceFindingEntity finding)
     {
         var alertMessage = $"Critical certificate vulnerability: {finding.Type} — " +
                            $"Subject={cert.SubjectDN}, Serial={cert.SerialNumber}. " +
@@ -406,12 +406,12 @@ public class CertVulnerabilityScanJob : SingletonCronJob
     }
 
     /// <summary>
-    /// Creates a new <see cref="CertVulnerabilityEntity"/> with the specified parameters.
+    /// Creates a new <see cref="CertComplianceFindingEntity"/> with the specified parameters.
     /// </summary>
-    private CertVulnerabilityEntity CreateFinding(
+    private CertComplianceFindingEntity CreateFinding(
         Guid certificateId, string severity, string type, string description)
     {
-        return new CertVulnerabilityEntity
+        return new CertComplianceFindingEntity
         {
             CertificateId = certificateId,
             Severity = severity,

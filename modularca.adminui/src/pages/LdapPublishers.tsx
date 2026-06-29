@@ -291,7 +291,7 @@ export const LdapPublisherManager: React.FC<{ caId: string }> = ({ caId }) => {
         { key: 'name', header: 'Name', defaultWidth: 170, minWidth: 130, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white truncate">{p.name}</span> },
         { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (p) => (p.enabled ? 'enabled' : 'disabled'), render: (p) => <StatusBadge status={p.enabled ? 'enabled' : 'disabled'} /> },
         { key: 'host', header: 'Host', defaultWidth: 180, exportValue: (p) => `${p.host}:${p.port}`, render: (p) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{p.host}:{p.port}</span> },
-        { key: 'publishes', header: 'Publishes', defaultWidth: 180, flex: true, exportValue: (p) => publishFlags(p), render: (p) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{publishFlags(p)}</span> },
+        { key: 'publishes', header: 'Publishes', defaultWidth: 180, exportValue: (p) => publishFlags(p), render: (p) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{publishFlags(p)}</span> },
         { key: 'update', header: 'Update', defaultWidth: 110, exportValue: (p) => p.updateInterval || '', render: (p) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{p.updateInterval || '-'}</span> },
         { key: 'lastUpdated', header: 'Last Updated', defaultWidth: 160, exportValue: (p) => formatDate(p.lastUpdated), render: (p) => <span className="text-xs text-gray-700 dark:text-gray-300">{formatDate(p.lastUpdated)}</span> },
     ];

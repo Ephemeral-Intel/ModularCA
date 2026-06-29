@@ -113,7 +113,7 @@ const Users: React.FC = () => {
         { key: 'username', header: 'Username', defaultWidth: 180, minWidth: 120, truncate: false, exportValue: (u) => u.username, render: (u) => <span className="text-gray-900 dark:text-white font-medium truncate">{u.username}</span> },
         { key: 'email', header: 'Email', defaultWidth: 220, exportValue: (u) => u.email || '', render: (u) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{u.email}</span> },
         {
-            key: 'groups', header: 'Groups', defaultWidth: 240, minWidth: 140, flex: true, truncate: false,
+            key: 'groups', header: 'Groups', defaultWidth: 240, minWidth: 140, truncate: false,
             exportValue: (u) => (u.groups || []).map((g: any) => g.displayName || g.groupName).join(', '),
             render: (u) => (
                 <span className="flex gap-1 flex-wrap">

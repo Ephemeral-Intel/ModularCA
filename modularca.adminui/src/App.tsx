@@ -9,6 +9,7 @@ import { ToastProvider } from './context/ToastContext';
 import { TenantProvider } from './context/TenantContext';
 import { AuthProvider } from './context/AuthContext';
 import ScrollToTop from './components/ScrollToTop';
+import TitleManager from './components/TitleManager';
 
 // Auth pages — eagerly loaded (entry points, must render immediately)
 import LoginPage from './pages/Login';
@@ -98,6 +99,7 @@ const App: React.FC = () => {
                         <TenantProvider>
                             <Router basename="/admin">
                                 <ScrollToTop />
+                                <TitleManager />
                                 <Routes>
                                     <Route path="/banner" element={<LoginBannerPage />} />
                                     <Route path="/login" element={<LoginPage />} />

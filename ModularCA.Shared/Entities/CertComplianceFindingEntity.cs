@@ -4,14 +4,14 @@ using System.ComponentModel.DataAnnotations.Schema;
 namespace ModularCA.Shared.Entities;
 
 /// <summary>
-/// Records a vulnerability or informational finding detected during automated
-/// certificate scanning. Each row ties a specific finding type (weak key,
-/// deprecated algorithm, etc.) to a certificate and tracks resolution state.
+/// Records a compliance finding detected during automated certificate scanning.
+/// Each row ties a specific finding type (weak key, deprecated algorithm, etc.) to a
+/// certificate and tracks resolution state.
 /// </summary>
-[Table("CertVulnerabilities")]
-public class CertVulnerabilityEntity
+[Table("CertComplianceFindings")]
+public class CertComplianceFindingEntity
 {
-    /// <summary>Unique identifier for this vulnerability finding.</summary>
+    /// <summary>Unique identifier for this compliance finding.</summary>
     [Key]
     public Guid Id { get; set; } = Guid.NewGuid();
 

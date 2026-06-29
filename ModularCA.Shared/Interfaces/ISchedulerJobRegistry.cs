@@ -7,7 +7,7 @@ namespace ModularCA.Shared.Interfaces;
 /// <para>
 /// The registry exists because cron expressions for system jobs are scattered across
 /// dozens of paths (<c>Backup.Schedule</c>, <c>Audit.Retention.Schedule</c>,
-/// <c>CertExpiryNotification.Schedule</c>, <c>CertVulnerabilityScan.Schedule</c>,
+/// <c>CertExpiryNotification.Schedule</c>, <c>ComplianceScan.Schedule</c>,
 /// <c>CertPolicy.ExpireCheckSchedule</c>, <c>AutoRenewal.Schedule</c>, …) with no
 /// single dispatch table. The Schedules admin page consumes this registry as the
 /// source of truth and the <c>AdminSchedulerController</c> mutates cron + per-job

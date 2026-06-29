@@ -42,7 +42,7 @@ public class CertHealthScoreService : ICertHealthScoreService
         if (cert == null)
             throw new KeyNotFoundException($"Certificate {certificateId} not found.");
 
-        var vulnerabilities = await _db.CertVulnerabilities
+        var vulnerabilities = await _db.CertComplianceFindings
             .AsNoTracking()
             .Where(v => v.CertificateId == certificateId && !v.IsResolved)
             .ToListAsync();
@@ -62,7 +62,7 @@ public class CertHealthScoreService : ICertHealthScoreService
             .Where(c => certificateIds.Contains(c.CertificateId))
             .ToListAsync();
 
-        var vulns = await _db.CertVulnerabilities
+        var vulns = await _db.CertComplianceFindings
             .AsNoTracking()
             .Where(v => certificateIds.Contains(v.CertificateId) && !v.IsResolved)
             .ToListAsync();
@@ -75,7 +75,7 @@ public class CertHealthScoreService : ICertHealthScoreService
         foreach (var cert in certs)
         {
             vulnsByCert.TryGetValue(cert.CertificateId, out var certVulns);
-            results.Add(Evaluate(cert, certVulns ?? new List<CertVulnerabilityEntity>()));
+            results.Add(Evaluate(cert, certVulns ?? new List<CertComplianceFindingEntity>()));
         }
 
         return results;
@@ -84,7 +84,7 @@ public class CertHealthScoreService : ICertHealthScoreService
     /// <summary>
     /// Runs all scoring rules against a single certificate entity and its active vulnerabilities.
     /// </summary>
-    private CertHealthScore Evaluate(CertificateEntity cert, List<CertVulnerabilityEntity> vulnerabilities)
+    private CertHealthScore Evaluate(CertificateEntity cert, List<CertComplianceFindingEntity> vulnerabilities)
     {
         var factors = new List<CertHealthFactor>();
         var now = DateTime.UtcNow;

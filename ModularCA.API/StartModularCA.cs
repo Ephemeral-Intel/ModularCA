@@ -405,7 +405,7 @@ if (!isSetupMode)
     {
         ["Backup.Schedule"] = config.Backup.Schedule,
         ["CertExpiryNotification.Schedule"] = config.CertExpiryNotification.Schedule,
-        ["CertVulnerabilityScan.Schedule"] = config.CertVulnerabilityScan.Schedule,
+        ["ComplianceScan.Schedule"] = config.ComplianceScan.Schedule,
         ["AutoRenewal.Schedule"] = config.AutoRenewal.Schedule,
         ["Audit.Retention.Schedule"] = config.Audit.Retention.Schedule,
     };
@@ -611,7 +611,7 @@ var appConnStr = appConnBuilder.ConnectionString;
 var dbDurationInterceptor = new ModularCA.Core.Services.DbCommandDurationInterceptor();
 
 // Default CommandTimeout (30s) applied at registration. Heavy paths
-// (CRL generation, compliance reports, vulnerability scan, cert list) may override to a
+// (CRL generation, compliance reports, compliance scan, cert list) may override to a
 // higher value via `db.Database.SetCommandTimeout(...)` before executing long queries.
 const int defaultCommandTimeoutSeconds = 30;
 
@@ -1056,6 +1056,10 @@ builder.Services.AddScoped<ICsrService, CsrService>();
 builder.Services.AddControllers().AddJsonOptions(opts =>
 {
     opts.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+    // Emit every DateTime as ISO-8601 UTC with a trailing 'Z'. EF (MySQL datetime) and NCrontab
+    // hand us DateTimeKind.Unspecified values, which System.Text.Json would otherwise serialize
+    // without a zone — causing browsers to parse UTC instants as local time. See the converter.
+    opts.JsonSerializerOptions.Converters.Add(new ModularCA.API.Json.UtcDateTimeJsonConverter());
 });
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
@@ -1125,8 +1129,8 @@ builder.Services.AddScoped<ISecurityAlertService, SecurityAlertService>();
 builder.Services.AddScoped<IKeyCeremonyService, KeyCeremonyService>();
 builder.Services.AddScoped<CertExpiryNotificationJob>();
 builder.Services.AddScoped<ISchedulerJob, CertExpiryNotificationJob>(sp => sp.GetRequiredService<CertExpiryNotificationJob>());
-builder.Services.AddScoped<CertVulnerabilityScanJob>();
-builder.Services.AddScoped<ISchedulerJob, CertVulnerabilityScanJob>(sp => sp.GetRequiredService<CertVulnerabilityScanJob>());
+builder.Services.AddScoped<ComplianceScanJob>();
+builder.Services.AddScoped<ISchedulerJob, ComplianceScanJob>(sp => sp.GetRequiredService<ComplianceScanJob>());
 builder.Services.AddScoped<AutoRenewalJob>();
 builder.Services.AddScoped<ISchedulerJob, AutoRenewalJob>(sp => sp.GetRequiredService<AutoRenewalJob>());
 builder.Services.AddScoped<CertExpireJob>();

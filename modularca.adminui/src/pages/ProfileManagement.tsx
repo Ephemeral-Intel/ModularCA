@@ -130,7 +130,7 @@ const CertProfilesTab: React.FC = () => {
 
     const columns: DataTableColumn<any>[] = [
         {
-            key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, flex: true, truncate: false, exportValue: (p) => p.name,
+            key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, truncate: false, exportValue: (p) => p.name,
             render: (p) => (
                 <span className="flex items-center gap-2 min-w-0">
                     <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span>
@@ -445,7 +445,7 @@ const SigningProfilesTab: React.FC = () => {
 
     const columns: DataTableColumn<any>[] = [
         {
-            key: 'name', header: 'Name', defaultWidth: 220, minWidth: 150, flex: true, truncate: false, exportValue: (p) => p.name,
+            key: 'name', header: 'Name', defaultWidth: 220, minWidth: 150, truncate: false, exportValue: (p) => p.name,
             render: (p) => (
                 <span className="flex items-center gap-2 min-w-0">
                     <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span>
@@ -740,7 +740,7 @@ const SshSigningProfilesTab: React.FC = () => {
     const caKeyName = (id: string) => caKeys.find(k => k.id === id)?.name || id;
 
     const columns: DataTableColumn<any>[] = [
-        { key: 'name', header: 'Name', defaultWidth: 220, minWidth: 150, flex: true, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span> },
+        { key: 'name', header: 'Name', defaultWidth: 220, minWidth: 150, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span> },
         {
             key: 'allows', header: 'Allows', defaultWidth: 130, truncate: false,
             exportValue: (p) => [p.allowUserCerts ? 'User' : null, p.allowHostCerts ? 'Host' : null].filter(Boolean).join(', '),
@@ -948,7 +948,7 @@ const SshCertProfilesTab: React.FC = () => {
     };
 
     const columns: DataTableColumn<any>[] = [
-        { key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, flex: true, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span> },
+        { key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span> },
         { key: 'maxPrincipals', header: 'Max Principals', defaultWidth: 130, exportValue: (p) => (p.maxPrincipals ?? ''), render: (p) => <span className="text-xs text-gray-600 dark:text-gray-400">{p.maxPrincipals}</span> },
         { key: 'validity', header: 'Max Validity', defaultWidth: 120, exportValue: (p) => `${p.maxValidityHours}h`, render: (p) => <span className="text-xs text-gray-600 dark:text-gray-400">{p.maxValidityHours}h</span> },
     ];
@@ -1148,7 +1148,7 @@ const SshRequestProfilesTab: React.FC = () => {
     };
 
     const columns: DataTableColumn<any>[] = [
-        { key: 'name', header: 'Name', defaultWidth: 220, minWidth: 150, flex: true, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span> },
+        { key: 'name', header: 'Name', defaultWidth: 220, minWidth: 150, truncate: false, exportValue: (p) => p.name, render: (p) => <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span> },
         { key: 'approval', header: 'Approval', defaultWidth: 110, truncate: false, exportValue: (p) => (p.requireApproval ? 'Required' : 'Auto'), render: (p) => <StatusBadge status={p.requireApproval ? 'pending' : 'enabled'} label={p.requireApproval ? 'Required' : 'Auto'} /> },
         { key: 'caScope', header: 'CA Scope', defaultWidth: 170, exportValue: (p) => (p.certificateAuthorityId ? caName(p.certificateAuthorityId) : 'Any CA'), render: (p) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{p.certificateAuthorityId ? caName(p.certificateAuthorityId) : 'Any CA'}</span> },
         { key: 'validity', header: 'Max Validity', defaultWidth: 120, exportValue: (p) => `${p.maxValidityHours}h`, render: (p) => <span className="text-xs text-gray-600 dark:text-gray-400">{p.maxValidityHours}h</span> },

@@ -128,7 +128,7 @@ const CrlSchedulesSection: React.FC = () => {
         { key: 'name', header: 'Name', defaultWidth: 180, minWidth: 140, truncate: false, exportValue: (s) => s.name, render: (s) => <span className="text-gray-900 dark:text-white truncate">{s.name}</span> },
         { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (s) => (s.enabled ? 'enabled' : 'disabled'), render: (s) => <StatusBadge status={s.enabled ? 'enabled' : 'disabled'} /> },
         { key: 'cron', header: 'Cron', defaultWidth: 140, exportValue: (s) => s.cronExpression || s.updateInterval, render: (s) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{s.cronExpression || s.updateInterval}</span> },
-        { key: 'ca', header: 'CA', defaultWidth: 160, flex: true, exportValue: (s) => s.caName || s.caId || '', render: (s) => <span className="text-gray-700 dark:text-gray-300 truncate">{s.caName || s.caId || '-'}</span> },
+        { key: 'ca', header: 'CA', defaultWidth: 160, exportValue: (s) => s.caName || s.caId || '', render: (s) => <span className="text-gray-700 dark:text-gray-300 truncate">{s.caName || s.caId || '-'}</span> },
         { key: 'last', header: 'Last Generated', defaultWidth: 160, exportValue: (s) => formatDate(s.lastGenerated || s.lastRun), render: (s) => <span className="text-xs text-gray-700 dark:text-gray-300">{formatDate(s.lastGenerated || s.lastRun)}</span> },
         { key: 'next', header: 'Next Update', defaultWidth: 160, exportValue: (s) => formatDate(s.nextUpdateUtc || s.nextUpdate), render: (s) => <span className="text-xs text-gray-700 dark:text-gray-300">{formatDate(s.nextUpdateUtc || s.nextUpdate)}</span> },
     ];

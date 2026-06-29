@@ -241,7 +241,7 @@ public class MetricsService
     /// <summary>
     /// Histogram of scheduler job duration in seconds, labelled by job name. Bucketed
     /// to span from fast jobs (CrlExport when there's nothing to do) to long-running
-    /// audit-retention or vulnerability-scan runs.
+    /// audit-retention or compliance-scan runs.
     /// </summary>
     public static readonly Histogram SchedulerJobDuration = Metrics.CreateHistogram(
         "modularca_scheduler_job_duration_seconds", "Scheduler job duration in seconds",

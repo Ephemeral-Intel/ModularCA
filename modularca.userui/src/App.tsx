@@ -1,11 +1,12 @@
 import React, { Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import { StepUpMfaProvider } from './components/StepUpMfaContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { ToastProvider } from './context/ToastContext';
 import ScrollToTop from './components/ScrollToTop';
+import TitleManager from './components/TitleManager';
 
 // Auth pages — eagerly loaded (entry points, must render immediately)
 import Login from './pages/Login';
@@ -21,7 +22,7 @@ const MyCertificates = React.lazy(() => import('./pages/MyCertificates'));
 const CertificateRequests = React.lazy(() => import('./pages/CertificateRequests'));
 const MySshCertificates = React.lazy(() => import('./pages/MySshCertificates'));
 const CaInformation = React.lazy(() => import('./pages/CaInformation'));
-const MySecurity = React.lazy(() => import('./pages/MySecurity'));
+const AccountDetail = React.lazy(() => import('./pages/AccountDetail'));
 const NotFound = React.lazy(() => import('./pages/NotFound'));
 
 const PageLoader = () => (
@@ -35,6 +36,7 @@ const App = () => (
     <ToastProvider>
     <Router basename="/user">
         <ScrollToTop />
+        <TitleManager />
         <Routes>
             <Route path="/banner" element={<LoginBannerPage />} />
             <Route path="/login" element={<Login />} />
@@ -54,7 +56,9 @@ const App = () => (
                                     <Route path="/requests" element={<CertificateRequests />} />
                                     <Route path="/ssh" element={<MySshCertificates />} />
                                     <Route path="/authorities" element={<CaInformation />} />
-                                    <Route path="/security" element={<MySecurity />} />
+                                    <Route path="/account" element={<AccountDetail />} />
+                                    {/* Security is now a tab inside the account page; keep the old path working. */}
+                                    <Route path="/security" element={<Navigate to="/account" replace />} />
 
                                     {/* Catch-all 404 — must come last. Renders inside the
                                         authenticated user Layout so the user keeps the navigation

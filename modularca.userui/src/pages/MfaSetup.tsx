@@ -53,9 +53,10 @@ const MfaSetup: React.FC = () => {
         return <Navigate to="/login" replace />;
     }
 
-    // If MFA is already set up (no mfaSetupRequired flag), redirect to the security page.
+    // If MFA is already set up (no mfaSetupRequired flag), redirect to the account page
+    // (security is a tab there).
     if (!isMfaSetupRequired()) {
-        return <Navigate to="/security" replace />;
+        return <Navigate to="/account" replace />;
     }
 
     const handleTotpSetup = async () => {

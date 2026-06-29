@@ -235,7 +235,7 @@ const CaManagement: React.FC = () => {
 
     const caColumns: DataTableColumn<any>[] = [
         { key: 'type', header: 'Type', defaultWidth: 130, truncate: false, exportValue: (ca) => caTypeBadge(ca).label, render: (ca) => { const b = caTypeBadge(ca); return <StatusBadge status={b.status} label={b.label} />; } },
-        { key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, flex: true, truncate: false, exportValue: (ca) => ca.name || ca.subjectDN, render: (ca) => <span className="text-gray-900 dark:text-white truncate">{ca.name || ca.subjectDN}</span> },
+        { key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, truncate: false, exportValue: (ca) => ca.name || ca.subjectDN, render: (ca) => <span className="text-gray-900 dark:text-white truncate">{ca.name || ca.subjectDN}</span> },
         { key: 'tenant', header: 'Tenant', defaultWidth: 140, exportValue: (ca) => ca.tenantName || '', render: (ca) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{ca.tenantName || '-'}</span> },
         { key: 'status', header: 'Status', defaultWidth: 110, truncate: false, exportValue: (ca) => (ca.enabled !== false ? 'Enabled' : 'Disabled'), render: (ca) => <StatusBadge status={ca.enabled !== false ? 'enabled' : 'disabled'} label={ca.enabled !== false ? 'Enabled' : 'Disabled'} /> },
         { key: 'children', header: 'Children', defaultWidth: 90, exportValue: (ca) => (ca.children?.length || 0), render: (ca) => <span className="text-xs text-gray-600 dark:text-gray-400">{ca.children?.length || 0}</span> },

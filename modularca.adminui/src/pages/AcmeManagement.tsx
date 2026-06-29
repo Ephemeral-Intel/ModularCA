@@ -107,7 +107,7 @@ const EabKeyManagementSection: React.FC = () => {
         { key: 'keyId', header: 'Key ID', defaultWidth: 200, minWidth: 140, truncate: false, exportValue: (k) => k.keyId, render: (k) => <span className="font-mono text-xs text-gray-900 dark:text-white truncate">{k.keyId}</span> },
         { key: 'mac', header: 'MAC Key', defaultWidth: 120, exportValue: () => '(hidden)', render: () => <span className="font-mono text-xs text-gray-500">{maskKey()}</span> },
         { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (k) => getKeyStatus(k).label, render: (k) => { const s = getKeyStatus(k); return <StatusBadge status={s.status} label={s.label} />; } },
-        { key: 'description', header: 'Description', defaultWidth: 200, flex: true, exportValue: (k) => k.description || '', render: (k) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{k.description || '-'}</span> },
+        { key: 'description', header: 'Description', defaultWidth: 200, exportValue: (k) => k.description || '', render: (k) => <span className="text-xs text-gray-700 dark:text-gray-300 truncate">{k.description || '-'}</span> },
         { key: 'created', header: 'Created', defaultWidth: 160, exportValue: (k) => formatDate(k.createdAt), render: (k) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(k.createdAt)}</span> },
         { key: 'usedBy', header: 'Used By', defaultWidth: 150, exportValue: (k) => k.usedByAccountId || '', render: (k) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{k.usedByAccountId || '-'}</span> },
     ];
@@ -371,7 +371,7 @@ const AcmeAuditSection: React.FC = () => {
     const columns: DataTableColumn<any>[] = [
         { key: 'time', header: 'Time', defaultWidth: 180, minWidth: 140, exportValue: (e) => formatDate(e.timestamp || e.createdAt), render: (e) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(e.timestamp || e.createdAt)}</span> },
         { key: 'status', header: 'Status', defaultWidth: 90, truncate: false, exportValue: (e) => (e.success !== false ? 'OK' : 'FAIL'), render: (e) => <StatusBadge status={e.success !== false ? 'active' : 'revoked'} label={e.success !== false ? 'OK' : 'FAIL'} /> },
-        { key: 'action', header: 'Action', defaultWidth: 200, flex: true, exportValue: (e) => acmeAuditAction(e), render: (e) => <span className="text-sm text-gray-900 dark:text-white truncate">{acmeAuditAction(e)}</span> },
+        { key: 'action', header: 'Action', defaultWidth: 200, exportValue: (e) => acmeAuditAction(e), render: (e) => <span className="text-sm text-gray-900 dark:text-white truncate">{acmeAuditAction(e)}</span> },
         { key: 'clientIp', header: 'Client IP', defaultWidth: 160, exportValue: (e) => acmeAuditIp(e), render: (e) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400 truncate">{acmeAuditIp(e) || '-'}</span> },
     ];
 

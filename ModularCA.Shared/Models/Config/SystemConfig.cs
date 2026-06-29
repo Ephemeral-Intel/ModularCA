@@ -27,7 +27,7 @@ namespace ModularCA.Shared.Models.Config
         public WebAuthnConfig WebAuthn { get; set; } = new();
         public AlertConfig Alert { get; set; } = new();
         public CertExpiryNotificationConfig CertExpiryNotification { get; set; } = new();
-        public CertVulnerabilityScanConfig CertVulnerabilityScan { get; set; } = new();
+        public ComplianceScanConfig ComplianceScan { get; set; } = new();
         public CertPolicyConfig CertPolicy { get; set; } = new();
         public AutoRenewalConfig AutoRenewal { get; set; } = new();
 
@@ -409,7 +409,7 @@ namespace ModularCA.Shared.Models.Config
 
         /// <summary>
         /// Per-job timeouts in seconds. Keys are job names
-        /// (<c>LdapGroupSync</c>, <c>CertVulnerabilityScan</c>, <c>AutoRenewal</c>, etc.).
+        /// (<c>LdapGroupSync</c>, <c>Compliance</c>, <c>AutoRenewal</c>, etc.).
         /// Any job missing from the dictionary falls back to <see cref="DefaultJobTimeoutSeconds"/>.
         /// <para>
         /// Backed by <see cref="ConcurrentDictionary{TKey,TValue}"/> so concurrent reads from
@@ -422,7 +422,7 @@ namespace ModularCA.Shared.Models.Config
         public ConcurrentDictionary<string, int> JobTimeouts { get; set; } = new(new Dictionary<string, int>
         {
             ["LdapGroupSync"] = 120,
-            ["CertVulnerabilityScan"] = 600,
+            ["Compliance"] = 600,
             ["AutoRenewal"] = 300,
             ["BackupVerification"] = 120,
             ["AuditRetention"] = 600,
@@ -1043,12 +1043,12 @@ namespace ModularCA.Shared.Models.Config
     }
 
     /// <summary>
-    /// Configuration for the automated certificate vulnerability scanner that flags
+    /// Configuration for the automated certificate compliance scanner that flags
     /// weak keys, deprecated algorithms, over-long validity, missing SANs, and more.
     /// </summary>
-    public class CertVulnerabilityScanConfig
+    public class ComplianceScanConfig
     {
-        /// <summary>Whether the vulnerability scanner is enabled.</summary>
+        /// <summary>Whether the compliance scanner is enabled.</summary>
         public bool Enabled { get; set; } = true;
 
         /// <summary>Cron expression for the scan schedule. Default: daily at 3 AM UTC.</summary>
@@ -1061,7 +1061,7 @@ namespace ModularCA.Shared.Models.Config
         public List<string> DeprecatedAlgorithms { get; set; } = new() { "SHA1WithRSA", "MD5WithRSA" };
 
         /// <summary>
-        /// Validity threshold in days used by the vulnerability scanner to flag
+        /// Validity threshold in days used by the compliance scanner to flag
         /// over-long certificates in its report. This is a <b>warning threshold only</b> —
         /// the scanner emits a finding when a certificate's total validity exceeds this
         /// value, but the certificate remains valid and in use. Hard issuance limits live
@@ -1072,7 +1072,7 @@ namespace ModularCA.Shared.Models.Config
 
         /// <summary>
         /// Days before expiry within which a certificate is flagged as
-        /// "expiring soon" by the vulnerability scan job. Previously hardcoded to 30.
+        /// "expiring soon" by the compliance scan job. Previously hardcoded to 30.
         /// </summary>
         public int ExpiringWithinDays { get; set; } = 30;
     }

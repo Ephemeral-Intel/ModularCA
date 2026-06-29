@@ -187,7 +187,7 @@ const CertificateRequests: React.FC = () => {
 
     const columns: DataTableColumn<any>[] = [
         { key: 'status', header: 'Status', defaultWidth: 180, minWidth: 120, truncate: false, exportValue: (c) => csrStatusLabel(c), render: (c) => <StatusBadge status={csrStatus(c)} label={csrStatusLabel(c)} /> },
-        { key: 'subject', header: 'Subject', defaultWidth: 280, minWidth: 160, flex: true, exportValue: (c) => c.subjectName || c.subject || '', render: (c) => <span className="text-sm text-gray-800 dark:text-gray-200 truncate">{c.subjectName || c.subject}</span> },
+        { key: 'subject', header: 'Subject', defaultWidth: 280, minWidth: 160, exportValue: (c) => c.subjectName || c.subject || '', render: (c) => <span className="text-sm text-gray-800 dark:text-gray-200 truncate">{c.subjectName || c.subject}</span> },
         { key: 'algorithm', header: 'Algorithm', defaultWidth: 110, exportValue: (c) => c.keyAlgorithm || '', render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{c.keyAlgorithm}</span> },
         { key: 'size', header: 'Size', defaultWidth: 80, exportValue: (c) => (c.keySize ?? ''), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{c.keySize}</span> },
         { key: 'submitted', header: 'Submitted', defaultWidth: 160, exportValue: (c) => formatDate(c.submittedAt), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(c.submittedAt)}</span> },

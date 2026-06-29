@@ -3,6 +3,7 @@ import { apiGet, API_BASE } from '../api/client';
 import { useToast } from '../context/ToastContext';
 import StatusBadge from '../components/cards/StatusBadge';
 import DetailField from '../components/cards/DetailField';
+import { DataTable, type DataTableColumn } from '../components/DataTable';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -51,7 +52,6 @@ const CaInformation: React.FC = () => {
     const [authorities, setAuthorities] = useState<CaCertificate[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [expandedSerial, setExpandedSerial] = useState<string | null>(null);
 
     useEffect(() => {
         apiGet<CaCertificate[]>('/api/v1/user/authorities')
@@ -112,98 +112,107 @@ const CaInformation: React.FC = () => {
         }
     };
 
+    const columns: DataTableColumn<CaCertificate>[] = [
+        {
+            key: 'status', header: 'Status', defaultWidth: 110, truncate: false,
+            exportValue: (c) => caStatus(c),
+            render: (c) => {
+                const s = caStatus(c);
+                return <StatusBadge status={statusBadgeType(s)} label={s.charAt(0).toUpperCase() + s.slice(1)} />;
+            },
+        },
+        {
+            key: 'type', header: 'Type', defaultWidth: 120, truncate: false,
+            exportValue: (c) => caType(c),
+            render: (c) => (
+                <span className="px-2 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-gray-300 dark:border-gray-600">
+                    {caType(c)}
+                </span>
+            ),
+        },
+        {
+            key: 'name', header: 'Common Name', defaultWidth: 280,
+            exportValue: (c) => parseCn(c.subjectDN),
+            render: (c) => <span className="text-sm text-gray-900 dark:text-white truncate">{parseCn(c.subjectDN)}</span>,
+        },
+        {
+            key: 'expires', header: 'Expires', defaultWidth: 210, truncate: false,
+            exportValue: (c) => formatDate(c.notAfter),
+            render: (c) => {
+                const s = caStatus(c);
+                const daysLeft = Math.ceil((new Date(c.notAfter).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+                return (
+                    <span className="text-xs text-gray-600 dark:text-gray-400 flex items-center gap-2 whitespace-nowrap">
+                        {formatDate(c.notAfter)}
+                        {s === 'active' && daysLeft <= 90 && <span className="text-yellow-700 dark:text-yellow-400">{daysLeft}d left</span>}
+                    </span>
+                );
+            },
+        },
+    ];
+
+    const renderExpanded = (cert: CaCertificate) => {
+        const status = caStatus(cert);
+        const type = caType(cert);
+        return (
+            <div className="space-y-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <DetailField label="Subject" value={cert.subjectDN} />
+                    <DetailField label="Issuer" value={cert.issuer} />
+                    <DetailField label="Serial Number" value={cert.serialNumber} mono />
+                    <DetailField label="Not Before" value={formatDate(cert.notBefore)} />
+                    <DetailField label="Not After" value={formatDate(cert.notAfter)} />
+                    <DetailField label="Algorithm" value={`${cert.keyAlgorithm || '-'} ${cert.keySize || ''}`} />
+                    <DetailField label="Signature" value={cert.signatureAlgorithm || '-'} />
+                    <DetailField label="Type" value={type} />
+                </div>
+
+                {status === 'revoked' && (
+                    <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded p-2">
+                        <span className="text-xs text-red-800 dark:text-red-400">This CA certificate has been revoked.</span>
+                    </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-300 dark:border-gray-700">
+                    <button
+                        onClick={() => handleDownloadPem(cert)}
+                        className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                    >
+                        PEM
+                    </button>
+                    <button
+                        onClick={() => handleDownloadDer(cert)}
+                        className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                    >
+                        DER
+                    </button>
+                    <button
+                        onClick={() => handleDownloadChain(cert)}
+                        className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+                    >
+                        Trust Chain
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="p-3 sm:p-6 space-y-4 sm:space-y-6">
             <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Trusted CAs</h1>
 
-            {loading && <p className="text-sm text-gray-600 dark:text-gray-400">Loading...</p>}
-            {error && <p className="text-sm text-red-800 dark:text-red-400">{error}</p>}
-
-            {!loading && !error && authorities.length === 0 && (
-                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg p-8 text-center">
-                    <p className="text-gray-600">No Certificate Authorities available.</p>
-                </div>
-            )}
-
-            {!loading && !error && authorities.length > 0 && (
-                <div className="bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg overflow-hidden">
-                    {authorities.map((cert) => {
-                        const status = caStatus(cert);
-                        const type = caType(cert);
-                        const expanded = expandedSerial === cert.serialNumber;
-                        const daysLeft = Math.ceil((new Date(cert.notAfter).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-
-                        return (
-                            <div key={cert.serialNumber} className="border-b border-gray-300 dark:border-gray-700 last:border-b-0">
-                                <button
-                                    onClick={() => setExpandedSerial(expanded ? null : cert.serialNumber)}
-                                    className="w-full px-4 py-3 flex items-center gap-3 text-left hover:bg-gray-200/50 dark:hover:bg-gray-700/50 transition-colors"
-                                >
-                                    <span className="text-gray-600 text-xs">{expanded ? '\u25BC' : '\u25B6'}</span>
-                                    <StatusBadge
-                                        status={statusBadgeType(status)}
-                                        label={status.charAt(0).toUpperCase() + status.slice(1)}
-                                    />
-                                    <span className="px-2 py-0.5 text-xs rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-gray-300 dark:border-gray-600">
-                                        {type}
-                                    </span>
-                                    <span className="text-sm text-gray-900 dark:text-white truncate flex-1">
-                                        {parseCn(cert.subjectDN)}
-                                    </span>
-                                    {status === 'active' && daysLeft <= 90 && (
-                                        <span className="text-xs text-yellow-800 dark:text-yellow-400 flex-shrink-0">{daysLeft}d left</span>
-                                    )}
-                                    <span className="text-xs text-gray-600 flex-shrink-0">
-                                        Expires: {formatDate(cert.notAfter)}
-                                    </span>
-                                </button>
-
-                                {expanded && (
-                                    <div className="px-4 pb-4 bg-gray-50/50 dark:bg-gray-900/50 space-y-3">
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                                            <DetailField label="Subject" value={cert.subjectDN} />
-                                            <DetailField label="Issuer" value={cert.issuer} />
-                                            <DetailField label="Serial Number" value={cert.serialNumber} mono />
-                                            <DetailField label="Not Before" value={formatDate(cert.notBefore)} />
-                                            <DetailField label="Not After" value={formatDate(cert.notAfter)} />
-                                            <DetailField label="Algorithm" value={`${cert.keyAlgorithm || '-'} ${cert.keySize || ''}`} />
-                                            <DetailField label="Signature" value={cert.signatureAlgorithm || '-'} />
-                                            <DetailField label="Type" value={type} />
-                                        </div>
-
-                                        {status === 'revoked' && (
-                                            <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-800 rounded p-2">
-                                                <span className="text-xs text-red-800 dark:text-red-400">This CA certificate has been revoked.</span>
-                                            </div>
-                                        )}
-
-                                        <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-300 dark:border-gray-700">
-                                            <button
-                                                onClick={() => handleDownloadPem(cert)}
-                                                className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-                                            >
-                                                PEM
-                                            </button>
-                                            <button
-                                                onClick={() => handleDownloadDer(cert)}
-                                                className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                            >
-                                                DER
-                                            </button>
-                                            <button
-                                                onClick={() => handleDownloadChain(cert)}
-                                                className="px-3 py-1.5 text-xs bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
-                                            >
-                                                Trust Chain
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                </div>
-            )}
+            <DataTable<CaCertificate>
+                tableId="trusted-cas"
+                title="Trusted CAs"
+                rows={authorities}
+                rowKey={(c) => c.serialNumber}
+                loading={loading}
+                error={error}
+                empty="No Certificate Authorities available."
+                columns={columns}
+                exportFileName="trusted-cas"
+                renderExpanded={renderExpanded}
+            />
         </div>
     );
 };

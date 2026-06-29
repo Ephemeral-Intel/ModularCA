@@ -174,7 +174,7 @@ const RequestProfiles: React.FC = () => {
 
     const columns: DataTableColumn<any>[] = [
         {
-            key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, flex: true, truncate: false, exportValue: (p) => p.name,
+            key: 'name', header: 'Name', defaultWidth: 240, minWidth: 160, truncate: false, exportValue: (p) => p.name,
             render: (p) => (
                 <span className="flex items-center gap-2 min-w-0">
                     <span className="text-gray-900 dark:text-white font-medium truncate">{p.name}</span>

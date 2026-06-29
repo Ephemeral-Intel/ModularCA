@@ -86,7 +86,7 @@ public class ComplianceReportService : IComplianceReportService
 
         // --- Vulnerability Summary ---
         var certIds = allCerts.Select(c => c.CertificateId).ToList();
-        var unresolvedVulns = await _db.CertVulnerabilities
+        var unresolvedVulns = await _db.CertComplianceFindings
             .AsNoTracking()
             .Where(v => certIds.Contains(v.CertificateId) && !v.IsResolved)
             .ToListAsync();
@@ -247,7 +247,7 @@ public class ComplianceReportService : IComplianceReportService
         var sb = new StringBuilder();
 
         // Header row
-        sb.AppendLine("Serial,Subject,Issuer,Algorithm,KeySize,NotBefore,NotAfter,Status,HealthScore,Vulnerabilities");
+        sb.AppendLine("Serial,Subject,Issuer,Algorithm,KeySize,NotBefore,NotAfter,Status,HealthScore,Findings");
 
         foreach (var row in report.CertificateRows)
         {

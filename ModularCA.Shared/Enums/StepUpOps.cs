@@ -19,6 +19,9 @@ public static class StepUpOps
     public const string HoldCert = "hold-cert";
     public const string UnholdCert = "unhold-cert";
 
+    // User self-service revocation of an owned end-entity certificate
+    public const string RevokeSelfCert = "revoke-self-cert";
+
     // Certificate reissuance
     public const string ReissueCert = "reissue-cert";
 
@@ -199,6 +202,7 @@ public static class StepUpOps
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
         RevokeCert, HoldCert, UnholdCert,
+        RevokeSelfCert,
         ReissueCert,
         ExportCert,
         UpdateCertAcl,

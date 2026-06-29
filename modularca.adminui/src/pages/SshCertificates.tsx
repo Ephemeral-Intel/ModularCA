@@ -145,7 +145,7 @@ const SshCaKeys: React.FC<{ refreshTrigger: number; onRefresh: () => void }> = (
         { key: 'status', header: 'Status', defaultWidth: 130, truncate: false, exportValue: keyStatusLabel, render: keyStatusBadge },
         { key: 'algorithm', header: 'Algorithm', defaultWidth: 150, exportValue: (k) => `${k.keyType || k.algorithm}${k.keySize ? ` (${k.keySize})` : ''}`, render: (k) => <span className="text-xs text-gray-700 dark:text-gray-300">{k.keyType || k.algorithm}{k.keySize ? ` (${k.keySize})` : ''}</span> },
         {
-            key: 'role', header: 'Role', defaultWidth: 120, flex: true, truncate: false,
+            key: 'role', header: 'Role', defaultWidth: 120, truncate: false,
             exportValue: (k) => [k.isUserCa ? 'User' : null, k.isHostCa ? 'Host' : null].filter(Boolean).join(', '),
             render: (k) => (
                 <span className="flex gap-1">
@@ -582,7 +582,7 @@ const SshCerts: React.FC<{ refreshTrigger: number; onRefresh: () => void; caKeys
         },
         { key: 'keyId', header: 'Key ID', defaultWidth: 180, minWidth: 130, truncate: false, exportValue: (c) => c.keyId || c.identity || '', render: (c) => <span className={`text-sm truncate ${c.isRevoked ? 'text-gray-500 line-through' : 'text-gray-900 dark:text-white'}`}>{c.keyId || c.identity}</span> },
         { key: 'serial', header: 'Serial', defaultWidth: 120, exportValue: (c) => c.serialNumber || c.serial || '', render: (c) => <span className="font-mono text-xs text-gray-600 dark:text-gray-400">#{c.serialNumber || c.serial}</span> },
-        { key: 'principals', header: 'Principals', defaultWidth: 200, flex: true, exportValue: (c) => parsePrincipals(c.principals).join(', '), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{parsePrincipals(c.principals).join(', ')}</span> },
+        { key: 'principals', header: 'Principals', defaultWidth: 200, exportValue: (c) => parsePrincipals(c.principals).join(', '), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400 truncate">{parsePrincipals(c.principals).join(', ')}</span> },
         { key: 'validBefore', header: 'Expires', defaultWidth: 160, exportValue: (c) => formatDate(c.validBefore || c.expiresAt), render: (c) => <span className="text-xs text-gray-600 dark:text-gray-400">{formatDate(c.validBefore || c.expiresAt)}</span> },
     ];
 

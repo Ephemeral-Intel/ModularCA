@@ -14,7 +14,7 @@ public class AuditDbContext(DbContextOptions<AuditDbContext> options) : DbContex
     public DbSet<AuditCmpEntity> AuditCmp { get; set; }
     public DbSet<AuditAcmeEntity> AuditAcme { get; set; }
     public DbSet<AuditNetworkEntity> AuditNetwork { get; set; }
-    public DbSet<CertVulnerabilityEntity> CertVulnerabilities { get; set; }
+    public DbSet<CertComplianceFindingEntity> CertComplianceFindings { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

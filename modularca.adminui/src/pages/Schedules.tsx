@@ -36,16 +36,25 @@ const primaryButton = 'px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-whit
 // Time formatting
 // ---------------------------------------------------------------------------
 
+// The API serializes scheduler/CRL/LDAP timestamps from EF (MySQL datetime → DateTimeKind.Unspecified)
+// and NCrontab (also Unspecified), i.e. UTC instants WITHOUT a trailing 'Z'. `new Date('2026-06-29T03:00:00')`
+// would parse those as LOCAL time, shifting every relative label by the browser's UTC offset. Treat a
+// timezone-less ISO string as UTC by appending 'Z'; leave already-zoned strings (Z or ±hh:mm) untouched.
+function parseUtc(iso: string): Date {
+    const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso);
+    return new Date(hasTz ? iso : `${iso}Z`);
+}
+
 function formatAbsoluteUtc(iso: string | null | undefined): string {
     if (!iso) return '';
-    const d = new Date(iso);
+    const d = parseUtc(iso);
     if (isNaN(d.getTime())) return iso;
     return d.toISOString();
 }
 
 function formatRelative(iso: string | null | undefined, now: number): string {
     if (!iso) return '-';
-    const d = new Date(iso);
+    const d = parseUtc(iso);
     if (isNaN(d.getTime())) return iso;
     const deltaMs = d.getTime() - now;
     const future = deltaMs >= 0;
@@ -195,13 +204,17 @@ const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, loa
         }
     };
 
+    // No column flexes — every column keeps its natural width and the DataTable's trailing spacer
+    // soaks up the slack at the far right, so the row packs to the left. Last Run / Next Run sit
+    // side-by-side so they read as a pair.
     const columns: DataTableColumn<SchedulerJob>[] = [
         { key: 'name', header: 'Name', defaultWidth: 180, minWidth: 140, truncate: false, exportValue: (j) => j.name, render: (j) => <span className="text-gray-900 dark:text-white truncate">{j.name}</span> },
         { key: 'status', header: 'Status', defaultWidth: 100, truncate: false, exportValue: (j) => (j.enabled ? 'enabled' : 'disabled'), render: (j) => <StatusBadge status={j.enabled ? 'enabled' : 'disabled'} /> },
         { key: 'cron', header: 'Cron', defaultWidth: 130, exportValue: (j) => j.cronExpression, render: (j) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{j.cronExpression}</span> },
-        { key: 'lastRun', header: 'Last Run', defaultWidth: 140, exportValue: (j) => formatAbsoluteUtc(j.lastRunUtc), render: (j) => <TimeCell iso={j.lastRunUtc} now={now} /> },
+        { key: 'lastRun', header: 'Last Run', defaultWidth: 150, headerTitle: 'When this job last executed', exportValue: (j) => formatAbsoluteUtc(j.lastRunUtc), render: (j) => <TimeCell iso={j.lastRunUtc} now={now} /> },
+        { key: 'nextRun', header: 'Next Run', defaultWidth: 150, headerTitle: 'Next scheduled run, computed from the cron expression', exportValue: (j) => formatAbsoluteUtc(j.nextRunUtc), render: (j) => <TimeCell iso={j.nextRunUtc} now={now} /> },
         {
-            key: 'lastResult', header: 'Last Run Result', defaultWidth: 160, minWidth: 120, flex: true, truncate: false, exportValue: (j) => j.lastResult ?? 'never run',
+            key: 'lastResult', header: 'Last Run Result', defaultWidth: 170, minWidth: 120, truncate: false, exportValue: (j) => j.lastResult ?? 'never run',
             render: (j) => (
                 <div className="min-w-0">
                     {jobResultBadge(j.lastResult)}
@@ -209,7 +222,6 @@ const SystemJobsSection: React.FC<SystemJobsSectionProps> = ({ jobs, health, loa
                 </div>
             ),
         },
-        { key: 'nextRun', header: 'Next Run', defaultWidth: 140, exportValue: (j) => formatAbsoluteUtc(j.nextRunUtc), render: (j) => <TimeCell iso={j.nextRunUtc} now={now} /> },
         {
             key: 'failures', header: 'Failures', defaultWidth: 90, exportValue: (j) => j.consecutiveFailureCount,
             render: (j) => {
@@ -348,7 +360,7 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, loading,
 
     const crlColumns: DataTableColumn<CrlScheduleEntry>[] = [
         { key: 'ca', header: 'CA', defaultWidth: 160, minWidth: 120, truncate: false, exportValue: (c) => c.caLabel, render: (c) => <span className="text-gray-900 dark:text-white truncate">{c.caLabel || 'Unknown CA'}</span> },
-        { key: 'name', header: 'Name', defaultWidth: 180, flex: true, exportValue: (c) => c.name, render: (c) => <span className="text-gray-900 dark:text-white truncate">{c.name}</span> },
+        { key: 'name', header: 'Name', defaultWidth: 200, exportValue: (c) => c.name, render: (c) => <span className="text-gray-900 dark:text-white truncate">{c.name}</span> },
         { key: 'update', header: 'Update', defaultWidth: 110, exportValue: (c) => c.updateInterval, render: (c) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{c.updateInterval}</span> },
         { key: 'delta', header: 'Delta', defaultWidth: 100, exportValue: (c) => c.deltaInterval || '', render: (c) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{c.deltaInterval || '-'}</span> },
         { key: 'last', header: 'Last', defaultWidth: 140, exportValue: (c) => formatAbsoluteUtc(c.lastGenerated || c.lastUpdatedUtc), render: (c) => <TimeCell iso={c.lastGenerated || c.lastUpdatedUtc} now={now} /> },
@@ -364,7 +376,7 @@ const SchedulesSection: React.FC<SchedulesSectionProps> = ({ schedules, loading,
     const ldapColumns: DataTableColumn<LdapPublisherEntry>[] = [
         { key: 'ca', header: 'CA', defaultWidth: 150, minWidth: 120, truncate: false, exportValue: (l) => l.caLabel, render: (l) => <span className="text-gray-900 dark:text-white truncate">{l.caLabel || 'Unknown CA'}</span> },
         { key: 'host', header: 'Host', defaultWidth: 170, exportValue: (l) => `${l.host}:${l.port}`, render: (l) => <span className="text-gray-900 dark:text-white truncate">{l.host}:{l.port}</span> },
-        { key: 'baseDn', header: 'Base DN', defaultWidth: 200, flex: true, exportValue: (l) => l.baseDn, render: (l) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{l.baseDn}</span> },
+        { key: 'baseDn', header: 'Base DN', defaultWidth: 240, exportValue: (l) => l.baseDn, render: (l) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300 truncate">{l.baseDn}</span> },
         { key: 'update', header: 'Update', defaultWidth: 100, exportValue: (l) => l.updateInterval, render: (l) => <span className="font-mono text-xs text-gray-700 dark:text-gray-300">{l.updateInterval}</span> },
         { key: 'last', header: 'Last', defaultWidth: 130, exportValue: (l) => formatAbsoluteUtc(l.lastUpdatedUtc), render: (l) => <TimeCell iso={l.lastUpdatedUtc} now={now} /> },
         { key: 'next', header: 'Next', defaultWidth: 130, exportValue: (l) => formatAbsoluteUtc(l.nextUpdateUtc), render: (l) => <TimeCell iso={l.nextUpdateUtc} now={now} /> },

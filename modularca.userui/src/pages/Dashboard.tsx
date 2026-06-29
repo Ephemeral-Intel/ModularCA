@@ -23,12 +23,14 @@ function certStatus(cert: any): 'active' | 'revoked' | 'expired' {
     return 'active';
 }
 
+// Pull the username from the JWT for an immediate greeting. Deliberately avoids `sub`, which is
+// the user's GUID — we want the human-readable username, not the identifier.
 function parseUsername(): string | null {
     try {
         const token = localStorage.getItem('authToken');
         if (!token) return null;
         const payload = JSON.parse(atob(token.split('.')[1]));
-        return payload.sub || payload.unique_name || payload.name || null;
+        return payload.username || payload.unique_name || payload.name || null;
     } catch {
         return null;
     }
@@ -42,9 +44,21 @@ const Dashboard: React.FC = () => {
     const [errorCerts, setErrorCerts] = useState<string | null>(null);
     const [errorRequests, setErrorRequests] = useState<string | null>(null);
 
-    const username = parseUsername();
+    // Seed with the JWT username for an instant, GUID-free greeting; the /me fetch below upgrades
+    // it to the user's full name when set.
+    const [greetingName, setGreetingName] = useState<string | null>(parseUsername());
 
     useEffect(() => {
+        // Authoritative identity from the whoami endpoint (the SPA's intended source — avoids
+        // trusting the JWT body). Greet by "First Last" when set, otherwise the username; never
+        // the user's GUID.
+        apiGet<{ username: string; firstName?: string; lastName?: string }>('/api/v1/me')
+            .then((me) => {
+                const fullName = [me.firstName, me.lastName].map((s) => s?.trim()).filter(Boolean).join(' ');
+                setGreetingName(fullName || me.username || null);
+            })
+            .catch(() => { /* keep the JWT username fallback */ });
+
         apiGet<any>('/api/v1/user/certificates')
             .then((data) => setCertificates(Array.isArray(data) ? data : (data.items || [])))
             .catch((err) => setErrorCerts(err.message))
@@ -73,7 +87,7 @@ const Dashboard: React.FC = () => {
             {/* Welcome */}
             <div>
                 <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-                    {username ? `Welcome, ${username}` : 'Welcome'}
+                    {greetingName ? `Welcome, ${greetingName}` : 'Welcome'}
                 </h1>
                 <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
                     Your certificate management dashboard.

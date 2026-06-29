@@ -11,7 +11,7 @@ namespace ModularCA.Core.Services.SchedulerJobs;
 
 /// <summary>
 /// Base class for jobs that have a single global cron schedule (Backup, AuditRetention,
-/// AutoRenewal, CertVulnerabilityScan, CertExpiryNotification, CertExpire, AcmeCleanup,
+/// AutoRenewal, Compliance, CertExpiryNotification, CertExpire, AcmeCleanup,
 /// LdapGroupSync, TlsRenewal). Subclasses override <see cref="CronExpression"/> and
 /// <see cref="ExecuteAsync"/>; the base class evaluates past-due against the persistent
 /// <c>SchedulerJobStates.LastRunUtc</c>, applies <c>Scheduler.MissedRunPolicy</c> on first

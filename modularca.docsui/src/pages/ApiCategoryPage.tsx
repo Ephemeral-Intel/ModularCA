@@ -6,7 +6,7 @@ import type { Endpoint } from '../components/EndpointCard';
 let importedEndpoints: Endpoint[] = [];
 try {
     const mod = await import('../data/endpoints');
-    importedEndpoints = mod.endpoints ?? mod.default ?? [];
+    importedEndpoints = mod.endpoints ?? [];
 } catch {
     // Data file not yet created; use empty array
 }

@@ -120,15 +120,15 @@ public sealed class SchedulerJobRegistry : ISchedulerJobRegistry
                     return job.RunAsync(ct);
                 }),
 
-            // ---- CertVulnerabilityScan: CertVulnerabilityScan.Schedule + .Enabled ----------
-            ["CertVulnerabilityScan"] = new JobEntry(
-                getCron: cfg => cfg.CertVulnerabilityScan.Schedule,
-                setCron: (cfg, value) => cfg.CertVulnerabilityScan.Schedule = value,
-                isEnabled: cfg => cfg.CertVulnerabilityScan.Enabled,
-                setEnabled: (cfg, v) => cfg.CertVulnerabilityScan.Enabled = v,
+            // ---- Compliance (certificate compliance scan): ComplianceScan.Schedule + .Enabled ----------
+            ["Compliance"] = new JobEntry(
+                getCron: cfg => cfg.ComplianceScan.Schedule,
+                setCron: (cfg, value) => cfg.ComplianceScan.Schedule = value,
+                isEnabled: cfg => cfg.ComplianceScan.Enabled,
+                setEnabled: (cfg, v) => cfg.ComplianceScan.Enabled = v,
                 invokeAsync: (sp, ct) =>
                 {
-                    var job = sp.GetRequiredService<CertVulnerabilityScanJob>();
+                    var job = sp.GetRequiredService<ComplianceScanJob>();
                     return job.RunAsync(ct);
                 }),
 

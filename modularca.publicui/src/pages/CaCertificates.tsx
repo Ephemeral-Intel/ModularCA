@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiGet } from '../api/client';
 import { useToast } from '../context/ToastContext';
+import Chevron from '../components/Chevron';
 
 function formatDate(d: string | null) {
     if (!d) return '-';
@@ -72,7 +73,7 @@ const CaCertificates: React.FC = () => {
                                         {ca.notAfter && <> &middot; Valid until {formatDate(ca.notAfter)}</>}
                                     </p>
                                 </div>
-                                <span className="text-gray-600 text-xs">{isExpanded ? '\u25BC' : '\u25B6'}</span>
+                                <Chevron open={isExpanded} className="w-2.5 h-2.5 text-gray-600" />
                             </button>
                             {isExpanded && (
                                 <div className="px-5 pb-4 border-t border-gray-300 dark:border-gray-700 pt-3 space-y-3">
